@@ -79,7 +79,7 @@ fun WifiScannerScreen() {
                 }
             }
             isScanning = false
-            delay(3000) // 每3秒掃描一次
+            delay(100) // 每0.1秒掃描一次
         }
     }
 
