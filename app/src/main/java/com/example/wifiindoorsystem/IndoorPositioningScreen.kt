@@ -1,5 +1,8 @@
 package com.example.wifiindoorsystem
 
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -161,15 +164,22 @@ fun getIndoorSignalColorByLevel(level: Int): Color {
 @Composable
 fun IndoorPositioningScreen() {
     val context = LocalContext.current
-    // 檢查位置權限是否已授權
+
+    // 建立權限請求器
+    val requestLocationPermission = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { /* 重繪後自動 re-check */ }
+    )
+
+    // 檢查定位權限
     val locationPermissionGranted = ContextCompat.checkSelfPermission(
-        context,
-        android.Manifest.permission.ACCESS_FINE_LOCATION
+        context, Manifest.permission.ACCESS_FINE_LOCATION
     ) == PackageManager.PERMISSION_GRANTED
 
-    // 如果沒有權限，顯示請求權限的畫面
     if (!locationPermissionGranted) {
-        PermissionRequiredScreen()
+        PermissionRequiredScreen(onRequestPermission = {
+            requestLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        })
         return
     }
 
@@ -224,33 +234,38 @@ fun IndoorPositioningScreen() {
     if (showAddPointDialog) {
         AddReferencePointDialog(
             onDismiss = { showAddPointDialog = false },
-            onAddPoint = { name, x, y ->
-                // 將當前掃描結果轉換為 WifiReading 列表
-                val wifiReadings = scanResults.map { scan ->
-                    WifiReading(
-                        bssid = scan.BSSID,
-                        ssid = if (scan.SSID.isNullOrEmpty()) "未知網路" else scan.SSID,
-                        level = scan.level,
-                        frequency = scan.frequency
+            onAddPoint = { name, x, y, scanTimes -> 
+                val accumulated = mutableListOf<WifiReading>()
+                MainScope().launch {
+                    repeat(scanTimes) {
+                        @Suppress("DEPRECATION")
+                        wifiManager.startScan()
+                        delay(1000)
+                        @Suppress("DEPRECATION")
+                        wifiManager.scanResults.forEach { scan ->
+                            accumulated.add(
+                                WifiReading(
+                                    bssid = scan.BSSID,
+                                    ssid = if (scan.SSID.isNullOrEmpty()) "未知網路" else scan.SSID,
+                                    level = scan.level,
+                                    frequency = scan.frequency
+                                )
+                            )
+                        }
+                        delay(500)
+                    }
+                    val newPoint = ReferencePoint(
+                        id = UUID.randomUUID().toString(),
+                        name = name,
+                        x = x,
+                        y = y,
+                        wifiReadings = accumulated
                     )
+                    database.addReferencePoint(newPoint)
+                    referencePoints = database.referencePoints
+                    Toast.makeText(context, "已成功新增參考點：$name", Toast.LENGTH_SHORT).show()
+                    showAddPointDialog = false
                 }
-
-                // 建立新的參考點
-                val newPoint = ReferencePoint(
-                    id = UUID.randomUUID().toString(),
-                    name = name,
-                    x = x,
-                    y = y,
-                    wifiReadings = wifiReadings
-                )
-
-                // 新增至資料庫
-                database.addReferencePoint(newPoint)
-                referencePoints = database.referencePoints
-
-                // 顯示成功訊息
-                Toast.makeText(context, "已成功新增參考點：$name", Toast.LENGTH_SHORT).show()
-                showAddPointDialog = false
             },
             currentWifiCount = scanResults.size
         )
@@ -654,12 +669,13 @@ fun ReferencePointItem(point: ReferencePoint, onClick: () -> Unit) {
 @Composable
 fun AddReferencePointDialog(
     onDismiss: () -> Unit,
-    onAddPoint: (name: String, x: Double, y: Double) -> Unit,
+    onAddPoint: (name: String, x: Double, y: Double, scanCount: Int) -> Unit,
     currentWifiCount: Int
 ) {
     var name by remember { mutableStateOf("") }
     var xCoord by remember { mutableStateOf("") }
     var yCoord by remember { mutableStateOf("") }
+    var scanCount by remember { mutableStateOf("1") }
     var hasError by remember { mutableStateOf(false) }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -772,6 +788,26 @@ fun AddReferencePointDialog(
                     )
                 }
 
+                // 掃描次數輸入
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = scanCount,
+                    onValueChange = { scanCount = it },
+                    label = { Text("掃描次數") },
+                    singleLine = true,
+                    isError = hasError && scanCount.isBlank(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (hasError && scanCount.isBlank()) {
+                    Text(
+                        text = "請輸入掃描次數",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(start = 8.dp, top = 4.dp)
+                    )
+                }
+
                 Spacer(modifier = Modifier.height(24.dp))
 
                 // 按鈕列
@@ -788,13 +824,14 @@ fun AddReferencePointDialog(
 
                     Button(
                         onClick = {
-                            hasError = name.isBlank() || xCoord.isBlank() || yCoord.isBlank()
+                            hasError = name.isBlank() || xCoord.isBlank() || yCoord.isBlank() || scanCount.isBlank()
 
                             if (!hasError) {
                                 try {
                                     val x = xCoord.toDouble()
                                     val y = yCoord.toDouble()
-                                    onAddPoint(name, x, y)
+                                    val count = scanCount.toInt()
+                                    onAddPoint(name, x, y, count)
                                 } catch (e: NumberFormatException) {
                                     hasError = true
                                 }

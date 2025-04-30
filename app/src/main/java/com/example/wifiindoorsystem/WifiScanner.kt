@@ -1,5 +1,8 @@
 package com.example.wifiindoorsystem
 
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.wifi.ScanResult
@@ -25,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,15 +41,23 @@ import java.util.*
 @Composable
 fun WifiScannerScreen() {
     val context = LocalContext.current
-    // 檢查位置權限是否已授權
+
+    // 1. 建立權限請求器
+    val requestLocationPermission = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { /* Compose 重繪後會自動 re-check 權限 */ }
+    )
+
+    // 2. 檢查定位權限
     val locationPermissionGranted = ContextCompat.checkSelfPermission(
-        context,
-        android.Manifest.permission.ACCESS_FINE_LOCATION
+        context, Manifest.permission.ACCESS_FINE_LOCATION
     ) == PackageManager.PERMISSION_GRANTED
 
-    // 如果沒有權限，顯示請求權限的畫面
+    // 3. 權限不足時顯示請求畫面
     if (!locationPermissionGranted) {
-        PermissionRequiredScreen()
+        PermissionRequiredScreen(onRequestPermission = {
+            requestLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        })
         return
     }
 
@@ -169,7 +181,7 @@ fun WifiScannerScreen() {
 }
 
 @Composable
-fun PermissionRequiredScreen() {
+fun PermissionRequiredScreen(onRequestPermission: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -199,16 +211,17 @@ fun PermissionRequiredScreen() {
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "這個應用程式需要位置權限才能掃描 Wi-Fi 網路。請前往設定並允許位置權限。",
+                    text = "此功能需要定位權限才能掃描 Wi‑Fi，請授予定位權限。",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(
-                    onClick = { /* 這裡可加入導向權限設定的動作 */ },
+                    onClick = onRequestPermission,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("開啟設定")
+                    Text("授予權限")
                 }
             }
         }
