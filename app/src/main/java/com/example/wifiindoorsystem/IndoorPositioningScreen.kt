@@ -19,9 +19,11 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -39,7 +41,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -50,11 +56,26 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
+import android.content.res.Resources
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.math.abs
+import kotlin.math.exp
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.runtime.remember
+import androidx.compose.ui.unit.IntSize
 
 // 參考點資料結構
 data class ReferencePoint(
@@ -72,6 +93,13 @@ data class WifiReading(
     val ssid: String,
     val level: Int,
     val frequency: Int
+)
+
+// 目前位置資料結構
+data class CurrentPosition(
+    val x: Double,
+    val y: Double,
+    val accuracy: Double // 準確度估計值 (0-1)
 )
 
 // 儲存參考點資料的類
@@ -134,6 +162,80 @@ class ReferencePointDatabase private constructor(context: Context) {
         return gson.toJson(_referencePoints)
     }
 
+    // 使用加權平均計算目前位置
+    fun calculateCurrentPosition(wifiScans: List<ScanResult>): CurrentPosition? {
+        // 如果沒有參考點或掃描結果，則返回 null
+        if (_referencePoints.isEmpty() || wifiScans.isEmpty()) {
+            return null
+        }
+
+        // 將當前掃描結果轉換為 Map<BSSID, 訊號強度>
+        val currentBssidToLevel = wifiScans.associate { it.BSSID to it.level }
+        
+        // 計算每個參考點的權重 (距離的反比)
+        val weights = mutableListOf<Triple<ReferencePoint, Double, Int>>()
+        
+        for (referencePoint in _referencePoints) {
+            // 計算共同的 BSSID 數量
+            var commonBssidCount = 0
+            var signalDistanceSum = 0.0
+            
+            for (reading in referencePoint.wifiReadings) {
+                val currentLevel = currentBssidToLevel[reading.bssid]
+                if (currentLevel != null) {
+                    // 我們找到了共同的 BSSID
+                    commonBssidCount++
+                    // 計算訊號強度差異 (使用平方差)
+                    val diff = abs(reading.level - currentLevel)
+                    signalDistanceSum += diff * diff
+                }
+            }
+            
+            if (commonBssidCount > 0) {
+                // 計算平均距離並轉換為權重值
+                val avgDistance = signalDistanceSum / commonBssidCount
+                // 使用高斯函數計算權重：e^(-avgDistance/100)
+                // 訊號越相似，權重越高
+                val weight = exp(-avgDistance / 100)
+                weights.add(Triple(referencePoint, weight, commonBssidCount))
+            }
+        }
+        
+        // 如果沒有權重 (沒有共同的 BSSID)，則返回 null
+        if (weights.isEmpty()) {
+            return null
+        }
+        
+        // 按權重排序，僅使用前 3 個最相似的參考點 (如果有)
+        val topWeights = weights.sortedByDescending { it.second }.take(3)
+        
+        // 計算加權平均的位置
+        var weightSum = 0.0
+        var weightedX = 0.0
+        var weightedY = 0.0
+        
+        for ((point, weight, _) in topWeights) {
+            weightSum += weight
+            weightedX += weight * point.x
+            weightedY += weight * point.y
+        }
+        
+        // 計算精確度 (根據最高權重和平均權重的比值)
+        val accuracy = if (topWeights.size > 1) {
+            val maxWeight = topWeights.first().second
+            val avgWeight = weightSum / topWeights.size
+            maxWeight / (avgWeight * topWeights.size)
+        } else {
+            0.5 // 只有一個參考點時的默認準確度
+        }.coerceIn(0.0, 1.0)
+        
+        return CurrentPosition(
+            x = weightedX / weightSum,
+            y = weightedY / weightSum,
+            accuracy = accuracy
+        )
+    }
+
     companion object {
         @Volatile
         private var INSTANCE: ReferencePointDatabase? = null
@@ -147,7 +249,6 @@ class ReferencePointDatabase private constructor(context: Context) {
         }
     }
 }
-
 
 // 根據信號強度返回不同的顏色
 fun getIndoorSignalColorByLevel(level: Int): Color {
@@ -194,8 +295,17 @@ fun IndoorPositioningScreen() {
 
     // 新增參考點對話框狀態
     var showAddPointDialog by remember { mutableStateOf(false) }
+    var showMapDialog by remember { mutableStateOf(false) }
     var showScanResultsDialog by remember { mutableStateOf(false) }
     var selectedPoint by remember { mutableStateOf<ReferencePoint?>(null) }
+
+    // 目前位置狀態
+    var currentPosition by remember { mutableStateOf<CurrentPosition?>(null) }
+    var isCalculatingPosition by remember { mutableStateOf(false) }
+
+    // 地圖點擊座標
+    var clickedX by remember { mutableStateOf<Double?>(null) }
+    var clickedY by remember { mutableStateOf<Double?>(null) }
 
     // 匯出功能狀態
     var showExportDialog by remember { mutableStateOf(false) }
@@ -219,6 +329,13 @@ fun IndoorPositioningScreen() {
                     scanResults = wifiManager.scanResults
                     val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
                     lastScanTime = dateFormat.format(Date())
+
+                    // 嘗試計算目前位置
+                    if (referencePoints.isNotEmpty()) {
+                        isCalculatingPosition = true
+                        currentPosition = database.calculateCurrentPosition(scanResults)
+                        isCalculatingPosition = false
+                    }
                 } catch (se: SecurityException) {
                     // 處理權限錯誤
                 }
@@ -267,7 +384,24 @@ fun IndoorPositioningScreen() {
                     showAddPointDialog = false
                 }
             },
-            currentWifiCount = scanResults.size
+            currentWifiCount = scanResults.size,
+            initialX = clickedX,
+            initialY = clickedY
+        )
+    }
+
+    // 室內地圖對話框
+    if (showMapDialog) {
+        FloorMapDialog(
+            onDismiss = { showMapDialog = false },
+            referencePoints = referencePoints,
+            currentPosition = currentPosition,
+            onMapClick = { x, y ->
+                clickedX = x
+                clickedY = y
+                showMapDialog = false
+                showAddPointDialog = true
+            }
         )
     }
 
@@ -350,6 +484,17 @@ fun IndoorPositioningScreen() {
                         )
                     }
 
+                    // 地圖按鈕
+                    IconButton(
+                        onClick = { showMapDialog = true }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Map,
+                            contentDescription = "顯示地圖",
+                            tint = MaterialTheme.colorScheme.onPrimary
+                        )
+                    }
+
                     // 掃描狀態指示器
                     if (isScanning) {
                         val infiniteTransition = rememberInfiniteTransition(label = "scanAnimation")
@@ -385,8 +530,15 @@ fun IndoorPositioningScreen() {
                                 val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
                                 lastScanTime = dateFormat.format(Date())
 
-                                // 短暫延遲以顯示掃描動畫
+                                // 嘗試計算目前位置
                                 MainScope().launch {
+                                    if (referencePoints.isNotEmpty()) {
+                                        isCalculatingPosition = true
+                                        currentPosition = database.calculateCurrentPosition(scanResults)
+                                        isCalculatingPosition = false
+                                    }
+                                    
+                                    // 短暫延遲以顯示掃描動畫
                                     delay(1000)
                                     isScanning = false
                                 }
@@ -412,7 +564,12 @@ fun IndoorPositioningScreen() {
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { showAddPointDialog = true },
+                onClick = { 
+                    // 點擊新增參考點按鈕時先清除座標
+                    clickedX = null
+                    clickedY = null
+                    showAddPointDialog = true 
+                },
                 icon = { Icon(Icons.Default.Add, contentDescription = "新增") },
                 text = { Text("新增參考點") },
                 containerColor = MaterialTheme.colorScheme.primary,
@@ -425,56 +582,126 @@ fun IndoorPositioningScreen() {
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // 掃描狀態與時間資訊
-            Row(
+            // 目前位置狀態與掃描資訊列
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (isScanning) {
-                        val infiniteTransition = rememberInfiniteTransition(label = "pulseAnimation")
-                        val alpha by infiniteTransition.animateFloat(
-                            initialValue = 0.4f,
-                            targetValue = 1f,
-                            animationSpec = infiniteRepeatable(
-                                animation = tween(1000),
-                                repeatMode = RepeatMode.Reverse
-                            ),
-                            label = "alphaAnimation"
-                        )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isScanning || isCalculatingPosition) {
+                            val infiniteTransition = rememberInfiniteTransition(label = "pulseAnimation")
+                            val alpha by infiniteTransition.animateFloat(
+                                initialValue = 0.4f,
+                                targetValue = 1f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(1000),
+                                    repeatMode = RepeatMode.Reverse
+                                ),
+                                label = "alphaAnimation"
+                            )
 
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary)
-                                .alpha(alpha)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary)
+                                    .alpha(alpha)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "正在掃描 Wi-Fi...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else {
+                            Text(
+                                text = "已掃描到 ${scanResults.size} 個 Wi-Fi 網路",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+
+                    if (lastScanTime.isNotEmpty()) {
                         Text(
-                            text = "正在掃描 Wi-Fi...",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    } else {
-                        Text(
-                            text = "已掃描到 ${scanResults.size} 個 Wi-Fi 網路",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium
+                            text = "更新於: $lastScanTime",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-
-                if (lastScanTime.isNotEmpty()) {
-                    Text(
-                        text = "更新於: $lastScanTime",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                
+                // 顯示目前計算的位置 (如果有)
+                currentPosition?.let { pos ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MyLocation,
+                            contentDescription = "目前位置",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "目前位置: (${String.format("%.2f", pos.x)}, ${String.format("%.2f", pos.y)})",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        
+                        // 顯示定位準確度指示器
+                        val accuracyColor = when {
+                            pos.accuracy > 0.8 -> Color(0xFF4CAF50) // 高準確度 (綠色)
+                            pos.accuracy > 0.5 -> Color(0xFFFFC107) // 中等準確度 (黃色)
+                            else -> Color(0xFFF44336) // 低準確度 (紅色)
+                        }
+                        
+                        Box(
+                            modifier = Modifier
+                                .size(12.dp)
+                                .clip(CircleShape)
+                                .background(accuracyColor)
+                        )
+                        
+                        Spacer(modifier = Modifier.width(4.dp))
+                        
+                        Text(
+                            text = when {
+                                pos.accuracy > 0.8 -> "準確度高"
+                                pos.accuracy > 0.5 -> "準確度中"
+                                else -> "準確度低"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        
+                        Spacer(modifier = Modifier.weight(1f))
+                        
+                        // 顯示地圖按鈕
+                        TextButton(
+                            onClick = { showMapDialog = true },
+                            modifier = Modifier.padding(0.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Map,
+                                contentDescription = "查看地圖",
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("查看地圖")
+                        }
+                    }
                 }
             }
 
@@ -524,11 +751,25 @@ fun IndoorPositioningScreen() {
                             Spacer(modifier = Modifier.height(8.dp))
 
                             Text(
-                                text = "請點擊右下角的「新增參考點」按鈕\n開始建立室內定位地圖",
+                                text = "請點擊右下角的「新增參考點」按鈕\n或開啟地圖直接在平面圖上建立參考點",
                                 style = MaterialTheme.typography.bodyMedium,
                                 textAlign = TextAlign.Center,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            
+                            Spacer(modifier = Modifier.height(16.dp))
+                            
+                            Button(
+                                onClick = { showMapDialog = true },
+                                modifier = Modifier.padding(horizontal = 24.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Map,
+                                    contentDescription = "開啟地圖"
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("開啟室內地圖")
+                            }
                         }
                     }
                 } else {
@@ -670,11 +911,13 @@ fun ReferencePointItem(point: ReferencePoint, onClick: () -> Unit) {
 fun AddReferencePointDialog(
     onDismiss: () -> Unit,
     onAddPoint: (name: String, x: Double, y: Double, scanCount: Int) -> Unit,
-    currentWifiCount: Int
+    currentWifiCount: Int,
+    initialX: Double? = null,
+    initialY: Double? = null
 ) {
     var name by remember { mutableStateOf("") }
-    var xCoord by remember { mutableStateOf("") }
-    var yCoord by remember { mutableStateOf("") }
+    var xCoord by remember { mutableStateOf(initialX?.toString() ?: "") }
+    var yCoord by remember { mutableStateOf(initialY?.toString() ?: "") }
     var scanCount by remember { mutableStateOf("1") }
     var hasError by remember { mutableStateOf(false) }
 
@@ -697,6 +940,34 @@ fun AddReferencePointDialog(
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
+
+                // 座標來源提示
+                if (initialX != null && initialY != null) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.LocationOn,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "座標來自地圖上的點選位置",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
 
                 // 當前掃描資訊
                 Surface(
@@ -830,7 +1101,7 @@ fun AddReferencePointDialog(
                                 try {
                                     val x = xCoord.toDouble()
                                     val y = yCoord.toDouble()
-                                    val count = scanCount.toInt()
+                                    val count = scanCount.toInt().coerceAtLeast(1)
                                     onAddPoint(name, x, y, count)
                                 } catch (e: NumberFormatException) {
                                     hasError = true
@@ -839,6 +1110,242 @@ fun AddReferencePointDialog(
                         }
                     ) {
                         Text("儲存參考點")
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+// 擴展函數將Double轉換為Dp (像素到Dp的轉換)
+fun Double.toDp(): Dp {
+    return (this / Resources.getSystem().displayMetrics.density).dp
+}
+
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FloorMapDialog(
+    onDismiss: () -> Unit,
+    referencePoints: List<ReferencePoint>,
+    currentPosition: CurrentPosition?,
+    onMapClick: (x: Double, y: Double) -> Unit
+) {
+    val mapPainter = painterResource(id = R.drawable.floor_map)
+    
+    // 使用狀態來存儲地圖的實際尺寸
+    var mapWidth by remember { mutableStateOf(0) }
+    var mapHeight by remember { mutableStateOf(0) }
+    
+    // 縮放和平移狀態
+    var scale by remember { mutableStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+    val density = LocalDensity.current
+    
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.7f))
+                .clickable(onClick = onDismiss)
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth(0.95f)
+                    .fillMaxHeight(0.9f)
+                    .align(Alignment.Center)
+                    .clickable(enabled = false, onClick = {}),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // 標題列
+                    TopAppBar(
+                        title = {
+                            Text(
+                                text = "室內地圖",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = onDismiss) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "關閉"
+                                )
+                            }
+                        },
+                        actions = {
+                            // 說明文字
+                            Text(
+                                text = "可拖曳、縮放地圖，點擊新增參考點",
+                                modifier = Modifier.padding(end = 16.dp),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    )
+                    
+                    // 地圖內容
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                    ) {
+                        // 添加縮放和平移功能
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(Unit) {
+                                    detectTransformGestures { _, pan, zoom, _ ->
+                                        // 更新縮放
+                                        scale = (scale * zoom).coerceIn(0.5f, 3f)
+                                        
+                                        // 更新平移位置，考慮縮放因素
+                                        val newOffset = offset + pan
+                                        // 限制平移範圍
+                                        val maxX = maxOf(0f, (mapWidth * (scale - 1)) / 2)
+                                        val maxY = maxOf(0f, (mapHeight * (scale - 1)) / 2)
+                                        offset = Offset(
+                                            newOffset.x.coerceIn(-maxX, maxX),
+                                            newOffset.y.coerceIn(-maxY, maxY)
+                                        )
+                                    }
+                                }
+                        ) {
+                            // 可縮放和平移的地圖圖片
+                            Image(
+                                painter = mapPainter,
+                                contentDescription = "室內地圖",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer {
+                                        scaleX = scale
+                                        scaleY = scale
+                                        translationX = offset.x
+                                        translationY = offset.y
+                                    }
+                                    .onGloballyPositioned { coordinates ->
+                                        // 獲取實際尺寸
+                                        mapWidth = coordinates.size.width
+                                        mapHeight = coordinates.size.height
+                                    }
+                                    .pointerInput(Unit) {
+                                        detectTapGestures { tapOffset ->
+                                            // 考慮縮放和平移後的實際點擊位置
+                                            // 確保獲得正確的圖片尺寸
+                                            val painter = mapPainter
+                                            val imageState = painter.intrinsicSize
+                                            val imageSize = IntSize(
+                                                (imageState.width * scale).toInt(),
+                                                (imageState.height * scale).toInt()
+                                            )
+
+                                            // 計算圖片在視窗中的實際邊界
+                                            val actualX1 = offset.x
+                                            val actualY1 = offset.y
+                                            val actualX2 = actualX1 + imageSize.width
+                                            val actualY2 = actualY1 + imageSize.height
+
+                                            // 點擊點相對於圖片邊界的百分比位置
+                                            val x = ((tapOffset.x - actualX1) / (actualX2 - actualX1) * 100).coerceIn(0.0F, 100.0F)
+                                            val y = ((tapOffset.y - actualY1) / (actualY2 - actualY1) * 100).coerceIn(0.0F, 100.0F)
+                                            
+                                            onMapClick(x.toDouble(), y.toDouble())
+                                        }
+                                    }
+                            )
+                        }
+                        
+                        // 繪製參考點
+                        referencePoints.forEach { point ->
+                            // 確保地圖已經測量並有有效的尺寸
+                            if (mapWidth > 0 && mapHeight > 0) {
+                                // 考慮縮放和平移後的位置
+                                val pointX = (point.x / 100f) * mapWidth * scale + offset.x
+                                val pointY = (point.y / 100f) * mapHeight * scale + offset.y
+                                
+                                Box(
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .offset { 
+                                            IntOffset(
+                                                (pointX - 10.dp.value * density.density).roundToInt(),
+                                                (pointY - 10.dp.value * density.density).roundToInt()
+                                            )
+                                        }
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.8f))
+                                        .border(
+                                            width = 2.dp,
+                                            brush = SolidColor(Color.White),
+                                            shape = CircleShape
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = point.name.first().toString(),
+                                        color = Color.White,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+                        }
+                        
+                        // 繪製目前位置 (如果有)
+                        currentPosition?.let { pos ->
+                            // 確保地圖已經測量並有有效的尺寸
+                            if (mapWidth > 0 && mapHeight > 0) {
+                                // 考慮縮放和平移後的位置
+                                val currentX = (pos.x / 100f) * mapWidth * scale + offset.x
+                                val currentY = (pos.y / 100f) * mapHeight * scale + offset.y
+                                
+                                // 精確度圓圈
+                                Box(
+                                    modifier = Modifier
+                                        .size(80.dp)
+                                        .offset { 
+                                            IntOffset(
+                                                (currentX - 40.dp.value * density.density).roundToInt(),
+                                                (currentY - 40.dp.value * density.density).roundToInt()
+                                            )
+                                        }
+                                        .clip(CircleShape)
+                                        .background(
+                                            color = MaterialTheme.colorScheme.primary
+                                                .copy(alpha = 0.15f)
+                                        )
+                                )
+                                
+                                // 位置標記
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .offset { 
+                                            IntOffset(
+                                                (currentX - 12.dp.value * density.density).roundToInt(),
+                                                (currentY - 12.dp.value * density.density).roundToInt()
+                                            )
+                                        }
+                                        .clip(CircleShape)
+                                        .background(MaterialTheme.colorScheme.primary)
+                                        .border(
+                                            width = 3.dp,
+                                            brush = SolidColor(Color.White),
+                                            shape = CircleShape
+                                        )
+                                )
+                            }
+                        }
                     }
                 }
             }
