@@ -57,6 +57,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import android.content.res.Resources
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.MainScope
@@ -81,10 +82,8 @@ import androidx.compose.ui.unit.IntSize
 data class ReferencePoint(
     val id: String,
     val name: String,
-    val x: Double,
-    val y: Double,
-    val pixelX: Double? = null,  // 像素X座標
-    val pixelY: Double? = null,  // 像素Y座標
+    val x: Double,              // 百分比 X
+    val y: Double,              // 百分比 Y
     val wifiReadings: List<WifiReading>,
     val timestamp: Long = System.currentTimeMillis()
 )
@@ -101,8 +100,6 @@ data class WifiReading(
 data class CurrentPosition(
     val x: Double,
     val y: Double,
-    val pixelX: Double? = null,  // 像素X座標
-    val pixelY: Double? = null,  // 像素Y座標
     val accuracy: Double // 準確度估計值 (0-1)
 )
 
@@ -168,97 +165,63 @@ class ReferencePointDatabase private constructor(context: Context) {
 
     // 使用加權平均計算目前位置
     fun calculateCurrentPosition(wifiScans: List<ScanResult>): CurrentPosition? {
-        // 如果沒有參考點或掃描結果，則返回 null
         if (_referencePoints.isEmpty() || wifiScans.isEmpty()) {
             return null
         }
 
-        // 將當前掃描結果轉換為 Map<BSSID, 訊號強度>
         val currentBssidToLevel = wifiScans.associate { it.BSSID to it.level }
         
-        // 計算每個參考點的權重 (距離的反比)
         val weights = mutableListOf<Triple<ReferencePoint, Double, Int>>()
         
         for (referencePoint in _referencePoints) {
-            // 計算共同的 BSSID 數量
             var commonBssidCount = 0
             var signalDistanceSum = 0.0
             
             for (reading in referencePoint.wifiReadings) {
                 val currentLevel = currentBssidToLevel[reading.bssid]
                 if (currentLevel != null) {
-                    // 我們找到了共同的 BSSID
                     commonBssidCount++
-                    // 計算訊號強度差異 (使用平方差)
                     val diff = abs(reading.level - currentLevel)
                     signalDistanceSum += diff * diff
                 }
             }
             
             if (commonBssidCount > 0) {
-                // 計算平均距離並轉換為權重值
                 val avgDistance = signalDistanceSum / commonBssidCount
-                // 使用高斯函數計算權重：e^(-avgDistance/100)
-                // 訊號越相似，權重越高
                 val weight = exp(-avgDistance / 100)
                 weights.add(Triple(referencePoint, weight, commonBssidCount))
             }
         }
         
-        // 如果沒有權重 (沒有共同的 BSSID)，則返回 null
         if (weights.isEmpty()) {
             return null
         }
         
-        // 按權重排序，僅使用前 3 個最相似的參考點 (如果有)
         val topWeights = weights.sortedByDescending { it.second }.take(3)
         
-        // 計算加權平均的位置 (百分比座標)
         var weightSum = 0.0
         var weightedX = 0.0
         var weightedY = 0.0
-        var weightedPixelX = 0.0
-        var weightedPixelY = 0.0
-        var hasPixelCoords = false
         
         for ((point, weight, _) in topWeights) {
             weightSum += weight
             weightedX += weight * point.x
             weightedY += weight * point.y
-            
-            // 如果參考點有像素座標，則計算加權平均的像素座標
-            if (point.pixelX != null && point.pixelY != null) {
-                hasPixelCoords = true
-                weightedPixelX += weight * point.pixelX
-                weightedPixelY += weight * point.pixelY
-            }
         }
         
-        // 計算精確度 (根據最高權重和平均權重的比值)
         val accuracy = if (topWeights.size > 1) {
             val maxWeight = topWeights.first().second
             val avgWeight = weightSum / topWeights.size
             maxWeight / (avgWeight * topWeights.size)
         } else {
-            0.5 // 只有一個參考點時的默認準確度
+            0.5
         }.coerceIn(0.0, 1.0)
         
-        // 如果有像素座標，則返回像素座標，否則返回百分比座標
-        return if (hasPixelCoords) {
-            CurrentPosition(
-                x = weightedX / weightSum,
-                y = weightedY / weightSum,
-                pixelX = weightedPixelX / weightSum,
-                pixelY = weightedPixelY / weightSum,
-                accuracy = accuracy
-            )
-        } else {
-            CurrentPosition(
-                x = weightedX / weightSum,
-                y = weightedY / weightSum,
-                accuracy = accuracy
-            )
-        }
+        return CurrentPosition(
+            x = weightedX / weightSum,
+            y = weightedY / weightSum,
+            accuracy = accuracy
+        )
     }
 
     companion object {
@@ -382,7 +345,6 @@ fun IndoorPositioningScreen() {
         AddReferencePointDialog(
             onDismiss = { showAddPointDialog = false },
             onAddPoint = { name, x, y, scanTimes ->
-                
                 MainScope().launch {
                     val accumulated = mutableListOf<WifiReading>()
                     repeat(scanTimes) {
@@ -403,17 +365,15 @@ fun IndoorPositioningScreen() {
                         delay(500)
                     }
                     
-                    // 使用從 IndoorPositioningScreen 範圍捕獲的圖片固有尺寸
-                    val percentX = (x.toDouble() / floorPlanIntrinsicWidth.toDouble()) * 100.0
-                    val percentY = (y.toDouble() / floorPlanIntrinsicHeight.toDouble()) * 100.0
+                    // 將像素座標轉換為百分比座標
+                    val percentX = (x / floorPlanIntrinsicWidth) * 100.0
+                    val percentY = (y / floorPlanIntrinsicHeight) * 100.0
                     
                     val newPoint = ReferencePoint(
                         id = UUID.randomUUID().toString(),
                         name = name,
                         x = percentX,
                         y = percentY,
-                        pixelX = x,  // 儲存原始像素座標
-                        pixelY = y,  // 儲存原始像素座標
                         wifiReadings = accumulated
                     )
                     database.addReferencePoint(newPoint)
@@ -692,11 +652,12 @@ fun IndoorPositioningScreen() {
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         
-                        // 優先顯示像素座標，如果沒有則顯示百分比座標
-                        val displayText = if (pos.pixelX != null && pos.pixelY != null) {
-                            "目前位置: (${pos.pixelX.toInt()}, ${pos.pixelY.toInt()}) px"
+                        val displayText = if (floorPlanIntrinsicWidth > 0 && floorPlanIntrinsicHeight > 0) {
+                            val pixelX = (pos.x / 100.0) * floorPlanIntrinsicWidth
+                            val pixelY = (pos.y / 100.0) * floorPlanIntrinsicHeight
+                            "目前位置: (${pixelX.toInt()}, ${pixelY.toInt()}) px"
                         } else {
-                            "目前位置: (${String.format("%.2f", pos.x)}, ${String.format("%.2f", pos.y)})"
+                            "目前位置: (${String.format("%.2f", pos.x)}%, ${String.format("%.2f", pos.y)}%)"
                         }
                         
                         Text(
@@ -917,20 +878,12 @@ fun ReferencePointItem(point: ReferencePoint, onClick: () -> Unit) {
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-                // 顯示百分比座標和像素座標
-                if (point.pixelX != null && point.pixelY != null) {
-                    Text(
-                        text = "像素座標: (${point.pixelX.toInt()}, ${point.pixelY.toInt()}) px",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                } else {
-                    Text(
-                        text = "座標: (${point.x}, ${point.y})",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                // 只顯示百分比座標
+                Text(
+                    text = "座標: (${String.format("%.2f", point.x)}%, ${String.format("%.2f", point.y)}%)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
                 Spacer(modifier = Modifier.height(2.dp))
 
@@ -977,11 +930,10 @@ fun AddReferencePointDialog(
     var scanCount by remember { mutableStateOf("1") }
     var hasError by remember { mutableStateOf(false) }
     
-    // 在 AddReferencePointDialog Composable 函數內部獲取圖片資源是正確的，
-    // 因為它用於 UI 顯示 (例如 trailingIcon)。
     val floorPlanImage = painterResource(id = R.drawable.floor_map)
     val imageWidth = floorPlanImage.intrinsicSize.width
     val imageHeight = floorPlanImage.intrinsicSize.height
+    val localContext = LocalContext.current
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1021,7 +973,6 @@ fun AddReferencePointDialog(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             
-                            // 顯示像素座標信息
                             Column {
                                 Text(
                                     text = "座標來自地圖上的點選位置",
@@ -1029,8 +980,16 @@ fun AddReferencePointDialog(
                                     color = MaterialTheme.colorScheme.onPrimaryContainer
                                 )
                                 
+                                // 顯示像素座標與百分比座標
+                                val percentX = (initialX / imageWidth) * 100.0
+                                val percentY = (initialY / imageHeight) * 100.0
                                 Text(
                                     text = "像素座標: (${initialX.toInt()}, ${initialY.toInt()}) px",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                                )
+                                Text(
+                                    text = "百分比座標: (${String.format("%.2f", percentX)}%, ${String.format("%.2f", percentY)}%)",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
                                 )
@@ -1089,7 +1048,7 @@ fun AddReferencePointDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // X 座標輸入 (顯示像素位置)
+                // X 座標輸入 (像素座標)
                 OutlinedTextField(
                     value = xCoord,
                     onValueChange = { xCoord = it },
@@ -1099,7 +1058,7 @@ fun AddReferencePointDialog(
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next),
                     trailingIcon = {
-                        if (initialX != null) {
+                        if (imageWidth > 0) {
                             Text(
                                 text = "圖寬: ${imageWidth.toInt()}px",
                                 style = MaterialTheme.typography.bodySmall,
@@ -1121,7 +1080,7 @@ fun AddReferencePointDialog(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
-                // Y 座標輸入 (顯示像素位置)
+                // Y 座標輸入 (像素座標)
                 OutlinedTextField(
                     value = yCoord,
                     onValueChange = { yCoord = it },
@@ -1131,7 +1090,7 @@ fun AddReferencePointDialog(
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                     trailingIcon = {
-                        if (initialY != null) {
+                        if (imageHeight > 0) {
                             Text(
                                 text = "圖高: ${imageHeight.toInt()}px",
                                 style = MaterialTheme.typography.bodySmall,
@@ -1191,12 +1150,21 @@ fun AddReferencePointDialog(
 
                             if (!hasError) {
                                 try {
-                                    val x = xCoord.toDouble()
-                                    val y = yCoord.toDouble()
-                                    val count = scanCount.toInt().coerceAtLeast(1)
-                                    onAddPoint(name, x, y, count)
+                                    val x = xCoord.toDoubleOrNull() ?: 0.0
+                                    val y = yCoord.toDoubleOrNull() ?: 0.0
+                                    val imageWidthDouble = imageWidth.toDouble()
+                                    val imageHeightDouble = imageHeight.toDouble()
+                                    
+                                    if (x < 0 || x > imageWidthDouble || y < 0 || y > imageHeightDouble) {
+                                        hasError = true
+                                        Toast.makeText(localContext, "座標超出圖片範圍", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        val count = scanCount.toIntOrNull()?.coerceAtLeast(1) ?: 1
+                                        onAddPoint(name, x, y, count)
+                                    }
                                 } catch (e: NumberFormatException) {
                                     hasError = true
+                                    Toast.makeText(localContext, "請輸入有效的數字", Toast.LENGTH_SHORT).show()
                                 }
                             }
                         }
@@ -1225,17 +1193,15 @@ fun FloorMapDialog(
     onMapClick: (x: Double, y: Double) -> Unit
 ) {
     val mapPainter = painterResource(id = R.drawable.floor_map)
-    
-    // 使用狀態來存儲地圖的實際像素尺寸
     var imageSize by remember { mutableStateOf(IntSize.Zero) }
-    var mapWidth by remember { mutableStateOf(0) }
-    var mapHeight by remember { mutableStateOf(0) }
-    
-    // 縮放和平移狀態
-    var scale by remember { mutableStateOf(1f) }
+    // 修改初始縮放比例為 2.0f (原本是 1f)
+    var scale by remember { mutableStateOf(2.0f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current
     
+    // 保存圖片實際的顯示尺寸和位置信息
+    val mapDisplayInfo = remember { mutableStateOf<MapDisplayInfo?>(null) }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = androidx.compose.ui.window.DialogProperties(
@@ -1259,66 +1225,91 @@ fun FloorMapDialog(
                 shape = RoundedCornerShape(16.dp)
             ) {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    // 標題列
                     TopAppBar(
                         title = {
                             Text(
-                                text = "室內地圖",
+                                "室內地圖",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold
                             )
                         },
                         navigationIcon = {
                             IconButton(onClick = onDismiss) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "關閉"
-                                )
+                                Icon(Icons.Default.Close, "關閉")
                             }
                         },
                         actions = {
-                            // 顯示圖片像素尺寸
                             if (imageSize != IntSize.Zero) {
                                 Text(
-                                    text = "圖片尺寸: ${mapPainter.intrinsicSize.width.toInt()}×${mapPainter.intrinsicSize.height.toInt()}px",
+                                    "圖片尺寸: ${mapPainter.intrinsicSize.width.toInt()}×${mapPainter.intrinsicSize.height.toInt()}px",
                                     modifier = Modifier.padding(end = 16.dp),
                                     style = MaterialTheme.typography.bodyMedium
                                 )
                             } else {
                                 Text(
-                                    text = "載入中...",
+                                    "載入中...",
                                     modifier = Modifier.padding(end = 16.dp),
                                     style = MaterialTheme.typography.bodyMedium
                                 )
                             }
                         }
                     )
-                    
-                    // 地圖內容
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                    ) {
-                        // 添加縮放和平移功能
+
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
                                 .pointerInput(Unit) {
-                                    detectTransformGestures { _, pan, zoom, _ ->
-                                        scale = (scale * zoom).coerceIn(0.5f, 3f)
+                                    // 修改手勢處理，只支援平移而不支援縮放
+                                    detectTapGestures(
+                                        onTap = { tapOffset ->
+                                            val info = mapDisplayInfo.value ?: return@detectTapGestures
+                                            
+                                            // 統一使用座標轉換函數
+                                            val pixelCoordinate = screenToPixelCoordinate(
+                                                screenX = tapOffset.x,
+                                                screenY = tapOffset.y,
+                                                scale = scale,
+                                                offset = offset,
+                                                displayInfo = info
+                                            )
+                                            
+                                            pixelCoordinate?.let { (pixelX, pixelY) ->
+                                                onMapClick(pixelX, pixelY)
+                                            }
+                                        }
+                                    )
+                                }
+                                .pointerInput(Unit) {
+                                    // 僅處理平移手勢，不處理縮放
+                                    detectDragGestures { change, dragAmount ->
+                                        change.consume()
                                         
-                                        val newOffset = offset + pan
-                                        val maxX = maxOf(0f, (mapWidth * (scale - 1)) / 2)
-                                        val maxY = maxOf(0f, (mapHeight * (scale - 1)) / 2)
-                                        offset = Offset(
-                                            newOffset.x.coerceIn(-maxX, maxX),
-                                            newOffset.y.coerceIn(-maxY, maxY)
-                                        )
+                                        // 更新偏移位置
+                                        val newOffset = offset + Offset(dragAmount.x, dragAmount.y)
+                                        
+                                        // 限制平移範圍
+                                        if (imageSize.width > 0 && imageSize.height > 0) {
+                                            // 計算顯示區域與實際圖片的尺寸差異
+                                            val displayInfo = mapDisplayInfo.value ?: return@detectDragGestures
+                                            val scaledWidth = displayInfo.displayWidth * scale
+                                            val scaledHeight = displayInfo.displayHeight * scale
+                                            
+                                            // 允許的最大偏移量（防止將圖片完全移出可見區域）
+                                            val maxOffsetX = maxOf(0f, (scaledWidth - imageSize.width) / 2)
+                                            val maxOffsetY = maxOf(0f, (scaledHeight - imageSize.height) / 2)
+                                            
+                                            // 邊界約束
+                                            offset = Offset(
+                                                newOffset.x.coerceIn(-maxOffsetX, maxOffsetX),
+                                                newOffset.y.coerceIn(-maxOffsetY, maxOffsetY)
+                                            )
+                                        } else {
+                                            offset = newOffset
+                                        }
                                     }
                                 }
                         ) {
-                            // 可縮放和平移的地圖圖片
                             Image(
                                 painter = mapPainter,
                                 contentDescription = "室內地圖",
@@ -1332,151 +1323,236 @@ fun FloorMapDialog(
                                         translationY = offset.y
                                     }
                                     .onGloballyPositioned { coordinates ->
-                                        // 獲取實際尺寸
-                                        mapWidth = coordinates.size.width
-                                        mapHeight = coordinates.size.height
                                         imageSize = coordinates.size
+                                        
+                                        // 計算圖片在容器中的實際顯示尺寸和位置
+                                        val containerWidth = coordinates.size.width.toFloat()
+                                        val containerHeight = coordinates.size.height.toFloat()
+                                        val intrinsicWidth = mapPainter.intrinsicSize.width
+                                        val intrinsicHeight = mapPainter.intrinsicSize.height
+                                        val imageAspectRatio = intrinsicWidth / intrinsicHeight
+                                        val containerAspectRatio = containerWidth / containerHeight
+                                        
+                                        var displayWidth = containerWidth
+                                        var displayHeight = containerHeight
+                                        
+                                        // 根據 ContentScale.Fit 調整顯示尺寸
+                                        if (imageAspectRatio > containerAspectRatio) {
+                                            // 圖片寬度適配容器，高度按比例縮放
+                                            displayHeight = displayWidth / imageAspectRatio
+                                        } else {
+                                            // 圖片高度適配容器，寬度按比例縮放
+                                            displayWidth = displayHeight * imageAspectRatio
+                                        }
+                                        
+                                        // 計算圖片在容器中的偏移（居中顯示）
+                                        val offsetX = (containerWidth - displayWidth) / 2
+                                        val offsetY = (containerHeight - displayHeight) / 2
+                                        
+                                        // 保存顯示信息以供座標轉換使用
+                                        mapDisplayInfo.value = MapDisplayInfo(
+                                            containerWidth = containerWidth,
+                                            containerHeight = containerHeight,
+                                            displayWidth = displayWidth,
+                                            displayHeight = displayHeight,
+                                            offsetX = offsetX,
+                                            offsetY = offsetY,
+                                            intrinsicWidth = intrinsicWidth,
+                                            intrinsicHeight = intrinsicHeight
+                                        )
                                     }
                                     .pointerInput(Unit) {
                                         detectTapGestures { tapOffset ->
-                                            // 確保圖片尺寸已獲取
-                                            if (imageSize != IntSize.Zero) {
-                                                // 原始圖片尺寸
-                                                val originalWidth = mapPainter.intrinsicSize.width
-                                                val originalHeight = mapPainter.intrinsicSize.height
-                                                
-                                                // 計算顯示區域邊界
-                                                val displayWidth = imageSize.width * scale
-                                                val displayHeight = imageSize.height * scale
-                                                
-                                                // 計算點擊位置相對於顯示區域的位置
-                                                val relativeX = (tapOffset.x - offset.x) / scale
-                                                val relativeY = (tapOffset.y - offset.y) / scale
-                                                
-                                                // 點擊位置在原始圖片上的像素位置
-                                                val pixelX = (relativeX / imageSize.width) * originalWidth
-                                                val pixelY = (relativeY / imageSize.height) * originalHeight
-                                                
-                                                // 限制在有效範圍內
-                                                if (pixelX >= 0 && pixelX <= originalWidth && 
-                                                    pixelY >= 0 && pixelY <= originalHeight) {
-                                                    // 將像素位置傳回
-                                                    onMapClick(pixelX.toDouble(), pixelY.toDouble())
-                                                }
+                                            val info = mapDisplayInfo.value ?: return@detectTapGestures
+                                            
+                                            // 統一使用座標轉換函數
+                                            val pixelCoordinate = screenToPixelCoordinate(
+                                                screenX = tapOffset.x,
+                                                screenY = tapOffset.y,
+                                                scale = scale,
+                                                offset = offset,
+                                                displayInfo = info
+                                            )
+                                            
+                                            pixelCoordinate?.let { (pixelX, pixelY) ->
+                                                onMapClick(pixelX, pixelY)
                                             }
                                         }
                                     }
                             )
-                            
-                            // 顯示座標提示
+
+                            // 繪製參考點
+                            val info = mapDisplayInfo.value
+                            if (info != null) {
+                                referencePoints.forEach { point ->
+                                    // 統一使用座標轉換函數
+                                    val screenCoord = pixelPercentToScreenCoordinate(
+                                        percentX = point.x,
+                                        percentY = point.y,
+                                        scale = scale, 
+                                        offset = offset,
+                                        displayInfo = info
+                                    )
+                                    
+                                    screenCoord?.let { (screenX, screenY) ->
+                                        Box(
+                                            modifier = Modifier
+                                                .size(20.dp)
+                                                .offset {
+                                                    IntOffset(
+                                                        (screenX - 10.dp.value * density.density).roundToInt(),
+                                                        (screenY - 10.dp.value * density.density).roundToInt()
+                                                    )
+                                                }
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.8f))
+                                                .border(2.dp, SolidColor(Color.White), CircleShape),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = point.name.first().toString(),
+                                                color = Color.White,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 繪製目前位置
+                            if (info != null) {
+                                currentPosition?.let { pos ->
+                                    // 統一使用座標轉換函數
+                                    val screenCoord = pixelPercentToScreenCoordinate(
+                                        percentX = pos.x,
+                                        percentY = pos.y,
+                                        scale = scale,
+                                        offset = offset,
+                                        displayInfo = info
+                                    )
+                                    
+                                    screenCoord?.let { (screenX, screenY) ->
+                                        // 繪製位置指示器（大圓）
+                                        Box(
+                                            modifier = Modifier
+                                                .size(80.dp)
+                                                .offset {
+                                                    IntOffset(
+                                                        (screenX - 40.dp.value * density.density).roundToInt(),
+                                                        (screenY - 40.dp.value * density.density).roundToInt()
+                                                    )
+                                                }
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f))
+                                        )
+                                        // 繪製位置指示器（小圓）
+                                        Box(
+                                            modifier = Modifier
+                                                .size(24.dp)
+                                                .offset {
+                                                    IntOffset(
+                                                        (screenX - 12.dp.value * density.density).roundToInt(),
+                                                        (screenY - 12.dp.value * density.density).roundToInt()
+                                                    )
+                                                }
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primary)
+                                                .border(3.dp, SolidColor(Color.White), CircleShape)
+                                        )
+                                    }
+                                }
+                            }
+
                             Text(
-                                text = "點擊地圖以建立參考點",
+                                "點擊地圖以建立參考點",
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
                                     .padding(bottom = 16.dp)
                                     .background(
-                                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
-                                        shape = RoundedCornerShape(4.dp)
+                                        MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
+                                        RoundedCornerShape(4.dp)
                                     )
                                     .padding(8.dp),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
-                        
-                        // 繪製參考點
-                        referencePoints.forEach { point ->
-                            // 獲取點的像素座標
-                            // 修正這裡可能的整數除法問題
-                            val pixelX = point.pixelX ?: (point.x.toDouble() / 100.0 * mapPainter.intrinsicSize.width)
-                            val pixelY = point.pixelY ?: (point.y.toDouble() / 100.0 * mapPainter.intrinsicSize.height)
-                            
-                            // 確保地圖已經測量並有有效的尺寸
-                            if (imageSize != IntSize.Zero) {
-                                // 將像素座標轉換為顯示座標
-                                val screenX = (pixelX / mapPainter.intrinsicSize.width) * imageSize.width * scale + offset.x
-                                val screenY = (pixelY / mapPainter.intrinsicSize.height) * imageSize.height * scale + offset.y
-                                
-                                Box(
-                                    modifier = Modifier
-                                        .size(20.dp)
-                                        .offset { 
-                                            IntOffset(
-                                                (screenX - 10.dp.value * density.density).roundToInt(),
-                                                (screenY - 10.dp.value * density.density).roundToInt()
-                                            )
-                                        }
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.8f))
-                                        .border(
-                                            width = 2.dp,
-                                            brush = SolidColor(Color.White),
-                                            shape = CircleShape
-                                        ),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = point.name.first().toString(),
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 10.sp
-                                    )
-                                }
-                            }
-                        }
-                        
-                        // 繪製目前位置 (如果有)
-                        currentPosition?.let { pos ->
-                            // 確保地圖已經測量並有有效的尺寸
-                            if (imageSize != IntSize.Zero) {
-                                // 優先使用像素座標，如果沒有則轉換百分比座標
-                                val pixelX = pos.pixelX ?: (pos.x / 100.0 * mapPainter.intrinsicSize.width)
-                                val pixelY = pos.pixelY ?: (pos.y / 100.0 * mapPainter.intrinsicSize.height)
-                                
-                                val screenX = (pixelX / mapPainter.intrinsicSize.width) * imageSize.width * scale + offset.x
-                                val screenY = (pixelY / mapPainter.intrinsicSize.height) * imageSize.height * scale + offset.y
-                                
-                                // 精確度圓圈
-                                Box(
-                                    modifier = Modifier
-                                        .size(80.dp)
-                                        .offset { 
-                                            IntOffset(
-                                                (screenX - 40.dp.value * density.density).roundToInt(),
-                                                (screenY - 40.dp.value * density.density).roundToInt()
-                                            )
-                                        }
-                                        .clip(CircleShape)
-                                        .background(
-                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                                        )
-                                )
-                                
-                                // 位置標記
-                                Box(
-                                    modifier = Modifier
-                                        .size(24.dp)
-                                        .offset { 
-                                            IntOffset(
-                                                (screenX - 12.dp.value * density.density).roundToInt(),
-                                                (screenY - 12.dp.value * density.density).roundToInt()
-                                            )
-                                        }
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.primary)
-                                        .border(
-                                            width = 3.dp,
-                                            brush = SolidColor(Color.White),
-                                            shape = CircleShape
-                                        )
-                                )
-                            }
-                        }
                     }
                 }
             }
         }
     }
+}
+
+// 保存地圖顯示相關信息的數據類
+data class MapDisplayInfo(
+    val containerWidth: Float,  // 容器寬度
+    val containerHeight: Float, // 容器高度
+    val displayWidth: Float,    // 圖片顯示寬度
+    val displayHeight: Float,   // 圖片顯示高度
+    val offsetX: Float,         // 圖片在容器中的X偏移
+    val offsetY: Float,         // 圖片在容器中的Y偏移
+    val intrinsicWidth: Float,  // 圖片原始寬度
+    val intrinsicHeight: Float  // 圖片原始高度
+)
+
+// 屏幕坐標轉換為像素坐標
+fun screenToPixelCoordinate(
+    screenX: Float,
+    screenY: Float,
+    scale: Float,
+    offset: Offset,
+    displayInfo: MapDisplayInfo
+): Pair<Double, Double>? {
+    // 先處理平移 (平移是在縮放後的坐標系中進行的)
+    val translationAdjustedX = screenX - offset.x
+    val translationAdjustedY = screenY - offset.y
+    
+    // 再處理縮放
+    val scaleAdjustedX = translationAdjustedX / scale
+    val scaleAdjustedY = translationAdjustedY / scale
+    
+    // 最後處理圖片在容器中的初始偏移
+    val adjustedX = scaleAdjustedX - displayInfo.offsetX
+    val adjustedY = scaleAdjustedY - displayInfo.offsetY
+    
+    // 將顯示坐標轉換為原始圖片的像素坐標
+    val pixelX = (adjustedX / displayInfo.displayWidth) * displayInfo.intrinsicWidth
+    val pixelY = (adjustedY / displayInfo.displayHeight) * displayInfo.intrinsicHeight
+    
+    // 確保坐標在圖片範圍內
+    return if (pixelX >= 0 && pixelX <= displayInfo.intrinsicWidth &&
+        pixelY >= 0 && pixelY <= displayInfo.intrinsicHeight) {
+        Pair(pixelX.toDouble(), pixelY.toDouble())
+    } else null
+}
+
+// 像素百分比坐標轉換為屏幕坐標
+fun pixelPercentToScreenCoordinate(
+    percentX: Double,
+    percentY: Double,
+    scale: Float,
+    offset: Offset,
+    displayInfo: MapDisplayInfo
+): Pair<Float, Float>? {
+    // 百分比轉換為顯示坐標
+    val displayX = (percentX / 100.0) * displayInfo.displayWidth
+    val displayY = (percentY / 100.0) * displayInfo.displayHeight
+    
+    // 添加圖片在容器中的初始偏移
+    val withOffsetX = displayX.toFloat() + displayInfo.offsetX
+    val withOffsetY = displayY.toFloat() + displayInfo.offsetY
+    
+    // 應用縮放
+    val scaledX = withOffsetX * scale
+    val scaledY = withOffsetY * scale
+    
+    // 最後應用平移，轉換為屏幕坐標
+    val screenX = scaledX + offset.x
+    val screenY = scaledY + offset.y
+    
+    return Pair(screenX, screenY)
 }
 
 @Composable
@@ -1790,3 +1866,7 @@ fun ExportDataDialog(
         }
     }
 }
+
+// 增加常數定義
+const val EXPORT_JSON_REQUEST_CODE = 1001
+

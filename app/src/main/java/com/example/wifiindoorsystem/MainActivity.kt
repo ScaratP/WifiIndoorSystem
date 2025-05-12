@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -29,8 +31,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import com.example.wifiindoorsystem.ui.theme.WifiIndoorSystemTheme
 
-// 匯出JSON檔案的請求碼
-const val EXPORT_JSON_REQUEST_CODE = 1001
+// 使用 IndoorPositioningScreen.kt 中定義的常數
+// 導入 EXPORT_JSON_REQUEST_CODE 常數
+import com.example.wifiindoorsystem.EXPORT_JSON_REQUEST_CODE
 
 class MainActivity : ComponentActivity() {
     
