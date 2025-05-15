@@ -110,6 +110,11 @@ fun WifiAppTabNavigation() {
             title = "Wi-Fi 掃描",
             icon = Icons.Default.Wifi,
             screen = { WifiScannerScreen() }
+        ),
+        TabItem(
+            title = "地圖測試",
+            icon = Icons.Default.Map,
+            screen = { MapTestScreen() }
         )
     )
     
