@@ -3,7 +3,7 @@ package com.example.wifiindoorsystem
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.graphics.PointF // Import PointF
+import android.graphics.PointF
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
@@ -61,11 +61,89 @@ class MyCustomImageView(context: Context, attrs: AttributeSet? = null) : TouchIm
     fun useTransformCoordBitmapToTouch(x: Float, y: Float): PointF {
         return transformCoordBitmapToTouch(x, y)
     }
+
+    // 新增標誌位，用於判斷是否正在進行手勢操作
+    var isGestureInProgress = false
+    
+    // 可重用的 Paint 對象，避免反覆創建
+    private val pointPaint = Paint().apply {
+        isAntiAlias = true
+        style = Paint.Style.FILL
+    }
+    
+    private val textPaint = Paint().apply {
+        isAntiAlias = true
+        textSize = 30f
+        color = android.graphics.Color.WHITE
+        textAlign = Paint.Align.CENTER
+    }
+    
+    private val borderPaint = Paint().apply {
+        isAntiAlias = true
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        color = android.graphics.Color.WHITE
+    }
+    
+    // 繪製參考點的方法移動到自定義視圖
+    fun drawReferencePointsOnCanvas(canvas: Canvas, points: List<ReferencePoint>) {
+        if (drawable == null) return
+        
+        // 取得圖片原始尺寸
+        val bitmapWidth = drawable.intrinsicWidth.toFloat()
+        val bitmapHeight = drawable.intrinsicHeight.toFloat()
+        
+        // 如果正在進行手勢操作，只繪製簡化版的參考點
+        val shouldDrawSimplified = isGestureInProgress
+        
+        // 繪製每個參考點
+        points.forEach { point ->
+            // 計算參考點在圖片上的絕對位置
+            val pointXOnBitmap = (point.x / 100f * bitmapWidth)
+            val pointYOnBitmap = (point.y / 100f * bitmapHeight)
+            
+            // 將點從圖片座標轉換為螢幕座標
+            val bitmapPoint = PointF(pointXOnBitmap.toFloat(), pointYOnBitmap.toFloat())
+            val mappedPoint = useTransformCoordBitmapToTouch(bitmapPoint.x, bitmapPoint.y)
+            
+            // 設置點的顏色
+            pointPaint.color = point.color.toArgb()
+            
+            // 繪製外圓
+            canvas.drawCircle(mappedPoint.x, mappedPoint.y, if (shouldDrawSimplified) 15f else 30f, pointPaint)
+            
+            // 如果不是簡化模式，繪製完整的參考點
+            if (!shouldDrawSimplified) {
+                // 繪製邊框
+                canvas.drawCircle(mappedPoint.x, mappedPoint.y, 30f, borderPaint)
+                
+                // 繪製標籤文字
+                canvas.drawText(
+                    point.name.take(1), 
+                    mappedPoint.x,
+                    mappedPoint.y + textPaint.textSize / 3,
+                    textPaint
+                )
+                
+                // 繪製名稱標籤
+                textPaint.textAlign = Paint.Align.LEFT
+                textPaint.color = point.color.toArgb()
+                canvas.drawText(
+                    point.name,
+                    mappedPoint.x + 40f,
+                    mappedPoint.y + 10f,
+                    textPaint
+                )
+                textPaint.textAlign = Paint.Align.CENTER
+                textPaint.color = android.graphics.Color.WHITE
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapTestScreen() {
+fun MapScreen() {
     // 圖片尺寸狀態
     var imageSize by remember { mutableStateOf(IntSize.Zero) }
     
@@ -96,6 +174,9 @@ fun MapTestScreen() {
     // 資料庫實例
     val context = LocalContext.current
     val database = remember { ReferencePointDatabase.getInstance(context) }
+
+    // 新增效能監控
+    var lastFrameTime by remember { mutableStateOf(0L) }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -130,6 +211,9 @@ fun MapTestScreen() {
                     factory = { ctx ->
                         // 使用自定義的 MyCustomImageView 而非基本的 TouchImageView
                         MyCustomImageView(ctx).apply {
+                            // 開啟硬體加速，提高繪圖效能
+                            setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                            
                             customImageViewRef.value = this
                             touchImageViewRef.value = this
                             setImageResource(R.drawable.floor_map)
@@ -138,57 +222,116 @@ fun MapTestScreen() {
                             maxZoom = 4f
                             minZoom = 0.8f
                             
-                            // 監聽點擊事件
+                            // 優化觸控事件處理
                             setOnTouchListener { v, event ->
-                                if (event.action == MotionEvent.ACTION_UP) {
-                                    // 使用自定義方法進行座標轉換
-                                    val mappedPoint = useTransformCoordTouchToBitmap(event.x, event.y, true)
-                                    
-                                    // 確保點擊的點在圖片範圍內
-                                    val bitmapWidth = drawable.intrinsicWidth
-                                    val bitmapHeight = drawable.intrinsicHeight
-                                    if (mappedPoint.x >= 0 && mappedPoint.x <= bitmapWidth &&
-                                        mappedPoint.y >= 0 && mappedPoint.y <= bitmapHeight) {
-                                        
-                                        // 計算百分比座標
-                                        val percentX = mappedPoint.x / bitmapWidth * 100f
-                                        val percentY = mappedPoint.y / bitmapHeight * 100f
-                                        
-                                        // 儲存點擊位置並顯示對話框
-                                        tapPosition = Pair(percentX, percentY)
-                                        showAddDialog = true
-                                        v.performClick() // Call performClick for accessibility
-                                        return@setOnTouchListener true
+                                when (event.action) {
+                                    MotionEvent.ACTION_DOWN -> {
+                                        isGestureInProgress = true
+                                        // 不立即重繪，而是在下一個動畫幀重繪
+                                        postInvalidateOnAnimation()
+                                        false
                                     }
+                                    MotionEvent.ACTION_UP -> {
+                                        if (event.pointerCount == 1) {
+                                            // 檢查是否超過點擊時間閾值
+                                            val currentTime = System.currentTimeMillis()
+                                            if (currentTime - lastFrameTime < 300) { // 小於300毫秒視為點擊
+                                                // 使用自定義方法進行座標轉換
+                                                val mappedPoint = useTransformCoordTouchToBitmap(event.x, event.y, true)
+                                                
+                                                // 確保點擊的點在圖片範圍內
+                                                val bitmapWidth = drawable.intrinsicWidth
+                                                val bitmapHeight = drawable.intrinsicHeight
+                                                if (mappedPoint.x >= 0 && mappedPoint.x <= bitmapWidth &&
+                                                    mappedPoint.y >= 0 && mappedPoint.y <= bitmapHeight) {
+                                                    
+                                                    // 計算百分比座標
+                                                    val percentX = mappedPoint.x / bitmapWidth * 100f
+                                                    val percentY = mappedPoint.y / bitmapHeight * 100f
+                                                    
+                                                    // 儲存點擊位置並顯示對話框
+                                                    tapPosition = Pair(percentX, percentY)
+                                                    showAddDialog = true
+                                                    v.performClick()
+                                                    return@setOnTouchListener true
+                                                }
+                                            }
+                                        }
+                                        
+                                        // 標記手勢結束，但不立即重繪
+                                        isGestureInProgress = false
+                                        // 延遲重繪，確保UI流暢性
+                                        postDelayed({ postInvalidateOnAnimation() }, 100)
+                                        lastFrameTime = System.currentTimeMillis()
+                                        false
+                                    }
+                                    MotionEvent.ACTION_CANCEL -> {
+                                        isGestureInProgress = false
+                                        postDelayed({ postInvalidateOnAnimation() }, 100)
+                                        false
+                                    }
+                                    MotionEvent.ACTION_MOVE -> {
+                                        // 移動時保持手勢標記，但不頻繁重繪
+                                        if (!isGestureInProgress) {
+                                            isGestureInProgress = true
+                                            postInvalidateOnAnimation()
+                                        }
+                                        false
+                                    }
+                                    else -> false
                                 }
-                                // Return false to allow TouchImageView to handle other gestures (pan, zoom)
-                                // TouchImageView's internal listener will handle it.
-                                // If we return true for events other than ACTION_UP, it might break pan/zoom.
-                                // The default behavior of setOnTouchListener is to return false if not handled.
-                                // Explicitly returning false for unhandled actions or relying on default.
-                                // For ACTION_UP handled, we return true. For others, let them pass.
-                                if (event.action == MotionEvent.ACTION_DOWN) {
-                                    // Allow TouchImageView to handle ACTION_DOWN for its gesture detector
-                                    return@setOnTouchListener false
-                                }
-                                // If not ACTION_UP and not ACTION_DOWN, or ACTION_UP not handled by us
-                                false
                             }
                             
-                            // 取得圖片大小以便更新 imageSize
+                            // 重新實現自定義覆蓋層，使用更高效的方式
                             post {
                                 imageSize = IntSize(drawable.intrinsicWidth, drawable.intrinsicHeight)
                                 
-                                // 建立自定義覆蓋層來繪製參考點
-                                setOnCustomEventListener { canvas, _, _ ->
-                                    drawReferencePoints(canvas, referencePoints)
+                                // 建立高效率渲染的覆蓋層
+                                val overlayView = object : View(context) {
+                                    init {
+                                        // 開啟硬體加速
+                                        setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                                    }
+                                    
+                                    override fun onDraw(canvas: Canvas) {
+                                        super.onDraw(canvas)
+                                        // 直接調用自定義方法繪製參考點
+                                        (touchImageViewRef.value as? MyCustomImageView)?.drawReferencePointsOnCanvas(
+                                            canvas, 
+                                            referencePoints
+                                        )
+                                    }
                                 }
+                                
+                                // 使用 OnTouchImageViewListener 更有效地處理縮放和平移事件
+                                setOnTouchImageViewListener(object : OnTouchImageViewListener {
+                                    private var lastCallTime = 0L
+                                    
+                                    override fun onMove() {
+                                        // 限制過於頻繁的刷新
+                                        val currentTime = System.currentTimeMillis()
+                                        if (currentTime - lastCallTime > 16) { // 約60fps
+                                            overlayView.postInvalidateOnAnimation() // 使用動畫框架的重繪方法
+                                            lastCallTime = currentTime
+                                        }
+                                    }
+                                })
+                                
+                                // 將覆蓋 View 加入到 TouchImageView 的父容器
+                                (parent as? android.view.ViewGroup)?.addView(overlayView, 
+                                    android.view.ViewGroup.LayoutParams(
+                                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                )
                             }
                         }
                     },
                     update = { view ->
-                        // 更新 TouchImageView 上的參考點
-                        view.invalidate()
+                        // 高效率的更新處理：只在必要時觸發重繪
+                        if (!(view as? MyCustomImageView)?.isGestureInProgress!!) {
+                            view.postInvalidateOnAnimation() // 使用更高效的重繪
+                        }
                     },
                     modifier = Modifier.fillMaxSize()
                 )
@@ -414,112 +557,6 @@ fun MapTestScreen() {
     LaunchedEffect(Unit) {
         referencePoints = database.referencePoints
     }
-}
-
-
-
-
-// 在 TouchImageView 上繪製參考點
-private fun TouchImageView.drawReferencePoints(canvas: Canvas, points: List<ReferencePoint>) {
-    // 取得圖片原始尺寸
-    val bitmapWidth = drawable.intrinsicWidth.toFloat()
-    val bitmapHeight = drawable.intrinsicHeight.toFloat()
-    
-    // 建立畫筆
-    val paint = Paint().apply {
-        isAntiAlias = true
-        style = Paint.Style.FILL
-    }
-    
-    val textPaint = Paint().apply {
-        isAntiAlias = true
-        textSize = 30f
-        color = android.graphics.Color.WHITE
-        textAlign = Paint.Align.CENTER
-    }
-    
-    val borderPaint = Paint().apply {
-        isAntiAlias = true
-        style = Paint.Style.STROKE
-        strokeWidth = 3f
-        color = android.graphics.Color.WHITE
-    }
-    
-    // 繪製每個參考點
-    points.forEach { point ->
-        // 計算參考點在圖片上的絕對位置
-        val pointXOnBitmap = (point.x / 100f * bitmapWidth)
-        val pointYOnBitmap = (point.y / 100f * bitmapHeight)
-        
-        // 將點從圖片座標轉換為螢幕座標
-        // 因為我們在擴展函數中，這裡的this是TouchImageView，無法直接調用protected方法
-        // 如果this是MyCustomImageView則使用自定義公開方法
-        val bitmapPoint = PointF(pointXOnBitmap.toFloat(), pointYOnBitmap.toFloat())
-        val mappedPoint = if (this is MyCustomImageView) {
-            this.useTransformCoordBitmapToTouch(bitmapPoint.x, bitmapPoint.y)
-        } else {
-            // 備用方案，但這不應該發生
-            PointF(0f, 0f)
-        }
-        
-        // 移除不必要的 null 檢查，因為 mappedPoint 永遠不會是 null
-        // 繪製外圓
-        paint.color = point.color.toArgb()
-        canvas.drawCircle(mappedPoint.x, mappedPoint.y, 30f, paint)
-        
-        // 繪製邊框
-        canvas.drawCircle(mappedPoint.x, mappedPoint.y, 30f, borderPaint)
-        
-        // 繪製標籤文字
-        canvas.drawText(
-            point.name.take(1), 
-            mappedPoint.x,
-            mappedPoint.y + textPaint.textSize / 3, // 垂直居中調整
-            textPaint
-        )
-        
-        // 繪製名稱標籤
-        textPaint.textAlign = Paint.Align.LEFT
-        textPaint.color = point.color.toArgb()
-        canvas.drawText(
-            point.name,
-            mappedPoint.x + 40f,
-            mappedPoint.y + 10f,
-            textPaint
-        )
-        textPaint.textAlign = Paint.Align.CENTER
-        textPaint.color = android.graphics.Color.WHITE
-    }
-}
-
-// 為 TouchImageView 擴展自定義繪製功能
-private fun TouchImageView.setOnCustomEventListener(onDraw: (Canvas, Float, Float) -> Unit) {
-    // Removed unused bitmap and overlayCanvas
-    // val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-    // val overlayCanvas = Canvas(bitmap)
-    
-    // 創建自定義 View 用於繪製疊加層
-    val overlayView = object : View(context) {
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            onDraw(canvas, width.toFloat(), height.toFloat())
-        }
-    }
-    
-    // 將覆蓋 View 加入到 TouchImageView 的父容器
-    (parent as? android.view.ViewGroup)?.addView(overlayView, 
-        android.view.ViewGroup.LayoutParams(
-            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-            android.view.ViewGroup.LayoutParams.MATCH_PARENT
-        )
-    )
-    
-    // 修正 OnTouchImageViewListener 實現方式
-    setOnTouchImageViewListener(object : OnTouchImageViewListener {
-        override fun onMove() {
-            overlayView.invalidate()
-        }
-    })
 }
 
 // 拓展 ReferencePoint 以支援顏色

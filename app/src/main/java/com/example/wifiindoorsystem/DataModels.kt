@@ -111,7 +111,7 @@ data class ReferencePoint(
                 x = x,
                 y = y,
                 timestamp = System.currentTimeMillis(),
-                wifiReadings = emptyList() // MapTestScreen 中的點預設沒有 wifiReadings
+                wifiReadings = emptyList() // MapScreen 中的點預設沒有 wifiReadings
             )
         }
     }
