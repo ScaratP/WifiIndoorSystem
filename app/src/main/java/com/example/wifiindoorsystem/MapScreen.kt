@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.PointF
 import android.util.AttributeSet
+import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import androidx.compose.foundation.background
@@ -33,12 +34,18 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,9 +59,18 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Card
 import com.ortiz.touchview.OnTouchImageViewListener
 import com.ortiz.touchview.TouchImageView
 import kotlinx.coroutines.launch
@@ -147,6 +163,15 @@ class MyCustomImageView(context: Context, attrs: AttributeSet? = null) : TouchIm
             }
         }
     }
+
+    // 新增：存放要繪製的參考點
+    var overlayPoints: List<ReferencePoint> = emptyList()
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        // 繪製最新的參考點
+        drawReferencePointsOnCanvas(canvas, overlayPoints)
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -164,9 +189,10 @@ fun MapScreen() {
     // 當前選擇的圖片ID
     var currentImageId by remember { mutableStateOf(ReferencePointDatabase.availableMapImages.first().id) }
     
-    // 參考點列表（按當前圖片過濾）
+    // 參考點列表 - 修改為保存所有參考點，然後按當前圖片ID過濾
     var allReferencePoints by remember { mutableStateOf(listOf<ReferencePoint>()) }
     val filteredReferencePoints = remember(allReferencePoints, currentImageId) {
+        // 過濾出當前圖片的參考點
         allReferencePoints.filter { it.imageId == currentImageId }
     }
     
@@ -192,12 +218,53 @@ fun MapScreen() {
     // 新增效能監控
     var lastFrameTime by remember { mutableStateOf(0L) }
 
+    // 添加模式切換狀態 - true 表示編輯模式，false 表示檢視模式
+    var isEditMode by remember { mutableStateOf(false) }
+
+    // 控制參考點列表的展開/收起狀態
+    var isListExpanded by remember { mutableStateOf(true) }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             Column {
                 TopAppBar(
-                    title = { Text("地圖參考點標記") }
+                    title = { Text("地圖參考點標記") },
+                    actions = {
+                        // 添加模式切換開關
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(end = 8.dp)
+                        ) {
+                            Text(
+                                text = if (isEditMode) "編輯模式" else "檢視模式",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (isEditMode) 
+                                    MaterialTheme.colorScheme.error 
+                                else 
+                                    MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            androidx.compose.material3.Switch(
+                                checked = isEditMode,
+                                onCheckedChange = { isEditMode = it },
+                                thumbContent = {
+                                    Icon(
+                                        imageVector = if (isEditMode)
+                                            Icons.Default.Edit
+                                        else
+                                            Icons.Default.Visibility,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = MaterialTheme.colorScheme.error,
+                                    checkedTrackColor = MaterialTheme.colorScheme.errorContainer
+                                )
+                            )
+                        }
+                    }
                 )
                 
                 // 圖片分類按鈕橫向滾動列表
@@ -242,18 +309,18 @@ fun MapScreen() {
             }
         }
     ) { paddingValues ->
+        // 修改為Column，但不使用整個頁面的verticalScroll
         Column(
             modifier = Modifier
                 .padding(paddingValues)
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp)
         ) {
-            // 使用 TouchImageView 取代標準 Image
+            // 地圖部分 - 固定不動
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f)
+                    .padding(16.dp)
                     .background(Color.LightGray)
             ) {
                 AndroidView(
@@ -281,10 +348,31 @@ fun MapScreen() {
                                         false
                                     }
                                     MotionEvent.ACTION_UP -> {
-                                        if (event.pointerCount == 1) {
-                                            // 檢查是否超過點擊時間閾值
+                                        // 在編輯模式下，快速響應點擊以添加參考點
+                                        if (isEditMode) {
+                                            // 使用自定義方法進行座標轉換
+                                            val mappedPoint = useTransformCoordTouchToBitmap(event.x, event.y, true)
+                                            
+                                            // 確保點擊的點在圖片範圍內
+                                            val bitmapWidth = drawable.intrinsicWidth
+                                            val bitmapHeight = drawable.intrinsicHeight
+                                            if (mappedPoint.x >= 0 && mappedPoint.x <= bitmapWidth &&
+                                                mappedPoint.y >= 0 && mappedPoint.y <= bitmapHeight) {
+                                                
+                                                // 計算百分比座標
+                                                val percentX = mappedPoint.x / bitmapWidth * 100f
+                                                val percentY = mappedPoint.y / bitmapHeight * 100f
+                                                
+                                                // 儲存點擊位置並顯示對話框
+                                                tapPosition = Pair(percentX, percentY)
+                                                showAddDialog = true
+                                                v.performClick()
+                                                return@setOnTouchListener true
+                                            }
+                                        } else {
+                                            // 檢視模式：需要符合點擊時間閾值才視為點擊
                                             val currentTime = System.currentTimeMillis()
-                                            if (currentTime - lastFrameTime < 300) { // 小於300毫秒視為點擊
+                                            if (currentTime - lastFrameTime < 300 && event.pointerCount == 1) {
                                                 // 使用自定義方法進行座標轉換
                                                 val mappedPoint = useTransformCoordTouchToBitmap(event.x, event.y, true)
                                                 
@@ -344,10 +432,10 @@ fun MapScreen() {
                                     
                                     override fun onDraw(canvas: Canvas) {
                                         super.onDraw(canvas)
-                                        // 直接調用自定義方法繪製參考點 (傳入過濾後的參考點)
+                                        // 使用過濾後的參考點列表
                                         (touchImageViewRef.value as? MyCustomImageView)?.drawReferencePointsOnCanvas(
                                             canvas, 
-                                            filteredReferencePoints // 只顯示當前圖片的參考點
+                                            filteredReferencePoints  // 使用過濾後的參考點列表
                                         )
                                     }
                                 }
@@ -377,176 +465,188 @@ fun MapScreen() {
                         }
                     },
                     update = { view ->
-                        // 更新當前顯示的圖片
+                        // 確保圖片資源與當前選擇匹配
                         if ((view as? MyCustomImageView)?.drawable?.constantState?.newDrawable()?.constantState !=
                             context.getDrawable(currentImageId)?.constantState) {
                             view.setImageResource(currentImageId)
                         }
-                        
-                        // 高效率的更新處理：只在必要時觸發重繪
-                        if (!view.isGestureInProgress) {
-                            view.postInvalidateOnAnimation() // 使用更高效的重繪
+                        // 傳入最新的參考點並重繪
+                        (view as? MyCustomImageView)?.let { mv ->
+                            mv.overlayPoints = filteredReferencePoints
+                            mv.invalidate()
                         }
                     },
                     modifier = Modifier.fillMaxSize()
                 )
                 
-                // 顯示當前地圖名稱標籤
-                val currentMap = ReferencePointDatabase.availableMapImages.find { it.id == currentImageId }
-                currentMap?.let {
+                // 編輯模式指示器
+                if (isEditMode) {
                     Surface(
                         modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(8.dp),
-                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
-                        shape = RoundedCornerShape(8.dp),
-                        shadowElevation = 4.dp
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 16.dp),
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.9f),
+                        shape = RoundedCornerShape(16.dp)
                     ) {
                         Row(
-                            modifier = Modifier.padding(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Map,
+                                imageVector = Icons.Default.Edit,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
+                                tint = MaterialTheme.colorScheme.error,
                                 modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.width(4.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = it.name,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
+                                text = "點擊地圖直接新增參考點",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                style = MaterialTheme.typography.bodyMedium
                             )
                         }
                     }
                 }
             }
             
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            // 參考點統計資訊
-            Box(
+            // 參考點列表部分 - 可收起，可獨立滑動
+            Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(
-                        MaterialTheme.colorScheme.secondaryContainer,
-                        RoundedCornerShape(8.dp)
-                    )
-                    .padding(12.dp)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 16.dp)
+                    .weight(1f), // 使用weight佔據剩餘空間
+                shape = RoundedCornerShape(16.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Map,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onSecondaryContainer
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    
-                    val currentMap = ReferencePointDatabase.availableMapImages.find { it.id == currentImageId }
-                    Column {
-                        Text(
-                            text = "${currentMap?.name ?: "地圖"} 參考點列表",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                        Text(
-                            text = "目前有 ${filteredReferencePoints.size} 個參考點",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
-                        )
-                    }
-                }
-            }
-            
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            // 參考點列表
-            if (filteredReferencePoints.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 32.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            imageVector = Icons.Default.Map,
-                            contentDescription = null,
-                            modifier = Modifier.size(48.dp),
-                            tint = Color.Gray.copy(alpha = 0.6f)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "此地圖尚無參考點",
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = Color.Gray
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "請點擊圖片或使用新增按鈕來添加參考點",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.Gray.copy(alpha = 0.8f)
-                        )
-                    }
-                }
-            } else {
-                filteredReferencePoints.forEach { point -> 
-                    ElevatedCard(
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // 列表標題與展開/收起按鈕
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
+                            .clickable { isListExpanded = !isListExpanded }
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Row(
-                            modifier = Modifier
-                                .padding(8.dp)
-                                .fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.LocationOn,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "參考點列表 (${filteredReferencePoints.size})",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        
+                        // 展開/收起箭頭圖示
+                        Icon(
+                            imageVector = if (isListExpanded) 
+                                Icons.Default.KeyboardArrowUp 
+                            else 
+                                Icons.Default.KeyboardArrowDown,
+                            contentDescription = if (isListExpanded) "收起" else "展開",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    
+                    HorizontalDivider()
+                    
+                    // 使用AnimatedVisibility控制內容顯示/隱藏
+                    AnimatedVisibility(
+                        visible = isListExpanded,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut()
+                    ) {
+                        // 獨立滾動的列表區域
+                        if (filteredReferencePoints.isEmpty()) {
                             Box(
                                 modifier = Modifier
-                                    .size(24.dp)
-                                    .clip(CircleShape)
-                                    .background(point.color),
+                                    .fillMaxWidth()
+                                    .height(200.dp)
+                                    .padding(16.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
-                                    text = point.id.takeLast(1),
-                                    color = Color.White
+                                    text = "尚無參考點，請點擊圖片或使用新增按鈕來添加",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = Color.Gray,
+                                    textAlign = TextAlign.Center
                                 )
                             }
-                            
-                            Spacer(modifier = Modifier.width(8.dp))
-                            
-                            Column {
-                                Text(
-                                    text = point.name,
-                                    style = MaterialTheme.typography.titleMedium
-                                )
-                                Text(
-                                    text = "X: ${String.format(Locale.US, "%.2f", point.x)}%, Y: ${String.format(Locale.US, "%.2f", point.y)}%",
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                            }
-                            
-                            Spacer(modifier = Modifier.weight(1f))
-                            
-                            IconButton(
-                                onClick = {
-                                    scope.launch {
-                                        database.deleteReferencePoint(point.id)
-                                        allReferencePoints = database.referencePoints
+                        } else {
+                            // 使用LazyColumn而不是forEach，提供獨立滾動能力
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 100.dp, max = 400.dp) // 限制最大高度
+                            ) {
+                                items(filteredReferencePoints) { point ->
+                                    ElevatedCard(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                                        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .padding(8.dp)
+                                                .fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(24.dp)
+                                                    .clip(CircleShape)
+                                                    .background(point.color),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = point.id.takeLast(1),
+                                                    color = Color.White
+                                                )
+                                            }
+                                            
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            
+                                            Column {
+                                                Text(
+                                                    text = point.name,
+                                                    style = MaterialTheme.typography.titleMedium
+                                                )
+                                                Text(
+                                                    text = "X: ${String.format(Locale.US, "%.2f", point.x)}%, Y: ${String.format(Locale.US, "%.2f", point.y)}%",
+                                                    style = MaterialTheme.typography.bodyMedium
+                                                )
+                                            }
+                                            
+                                            Spacer(modifier = Modifier.weight(1f))
+                                            
+                                            IconButton(
+                                                onClick = {
+                                                    scope.launch {
+                                                        database.deleteReferencePoint(point.id)
+                                                        allReferencePoints = database.referencePoints
+                                                    }
+                                                }
+                                            ) {
+                                                Icon(
+                                                    painter = painterResource(android.R.drawable.ic_menu_delete),
+                                                    contentDescription = "刪除",
+                                                    tint = Color.Red
+                                                )
+                                            }
+                                        }
                                     }
                                 }
-                            ) {
-                                Icon(
-                                    painter = painterResource(android.R.drawable.ic_menu_delete),
-                                    contentDescription = "刪除",
-                                    tint = Color.Red
-                                )
+                                // 底部間隔
+                                item {
+                                    Spacer(modifier = Modifier.height(80.dp))
+                                }
                             }
                         }
                     }
@@ -565,9 +665,19 @@ fun MapScreen() {
                     nameInput = ""
                 },
                 title = { 
-                    // 顯示當前所選圖片名稱
-                    val currentMap = ReferencePointDatabase.availableMapImages.find { it.id == currentImageId }
-                    Text("新增參考點至: ${currentMap?.name ?: "地圖"}")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isEditMode) "快速新增參考點" else "新增參考點",
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                    }
                 },
                 text = {
                     Column {
@@ -672,7 +782,7 @@ fun MapScreen() {
                             }
                         }
                     ) {
-                        Text("新增")
+                        Text(if (isEditMode) "快速新增" else "新增")
                     }
                 },
                 dismissButton = {
@@ -692,9 +802,21 @@ fun MapScreen() {
         }
     }
     
-    // 載入參考點資料
+    // 載入參考點資料 - 修改為使用實際的篩選邏輯
     LaunchedEffect(Unit) {
-        allReferencePoints = database.referencePoints
+        try {
+            // 載入所有參考點
+            allReferencePoints = database.referencePoints
+        } catch (e: Exception) {
+            Log.d("MapScreen", "參考點錯誤")
+        }
+    }
+    
+    // 監聽圖片ID變化，確保重新渲染
+    LaunchedEffect(currentImageId) {
+        // 觸發重新渲染
+        customImageViewRef.value?.invalidate()
+
     }
 }
 
