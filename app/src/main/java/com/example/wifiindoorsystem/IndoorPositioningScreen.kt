@@ -205,6 +205,7 @@ fun IndoorPositioningScreen() {
                         name = name,
                         x = percentX,
                         y = percentY,
+                        timestamp = System.currentTimeMillis(), // 新增 timestamp
                         wifiReadings = accumulated
                     )
                     database.addReferencePoint(newPoint)
@@ -1449,7 +1450,7 @@ fun WifiReadingItem(reading: WifiReading) {
                 modifier = Modifier
                     .padding(start = 8.dp)
                     .background(
-                        getIndoorSignalColorByLevel(reading.level),
+                        getSignalBackgroundByLevel(reading.level),
                         shape = RoundedCornerShape(4.dp)
                     )
                     .padding(horizontal = 8.dp, vertical = 4.dp)
