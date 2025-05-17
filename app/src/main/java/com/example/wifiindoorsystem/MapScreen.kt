@@ -2,6 +2,7 @@ package com.example.wifiindoorsystem
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color.toArgb
 import android.graphics.Paint
 import android.graphics.PointF
 import android.util.AttributeSet
@@ -18,26 +19,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
-import androidx.compose.material3.SwitchDefaults
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Edit
@@ -46,6 +27,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -70,7 +52,6 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Card
 import com.ortiz.touchview.OnTouchImageViewListener
 import com.ortiz.touchview.TouchImageView
 import kotlinx.coroutines.launch
@@ -131,7 +112,7 @@ class MyCustomImageView(context: Context, attrs: AttributeSet? = null) : TouchIm
             val mappedPoint = useTransformCoordBitmapToTouch(bitmapPoint.x, bitmapPoint.y)
             
             // 設置點的顏色
-            pointPaint.color = point.color.toArgb()
+            pointPaint.color = getPointColor(point).toArgb()
             
             // 繪製外圓
             canvas.drawCircle(mappedPoint.x, mappedPoint.y, if (shouldDrawSimplified) 15f else 30f, pointPaint)
@@ -151,7 +132,7 @@ class MyCustomImageView(context: Context, attrs: AttributeSet? = null) : TouchIm
                 
                 // 繪製名稱標籤
                 textPaint.textAlign = Paint.Align.LEFT
-                textPaint.color = point.color.toArgb()
+                textPaint.color = getPointColor(point).toArgb()
                 canvas.drawText(
                     point.name,
                     mappedPoint.x + 40f,
@@ -163,20 +144,144 @@ class MyCustomImageView(context: Context, attrs: AttributeSet? = null) : TouchIm
             }
         }
     }
+    
+    // 為參考點生成一致的顏色
+    private fun getPointColor(point: ReferencePoint): Color {
+        val hash = point.id.hashCode()
+        return Color(
+            red = ((hash and 0xFF0000) shr 16) / 255f,
+            green = ((hash and 0x00FF00) shr 8) / 255f,
+            blue = (hash and 0x0000FF) / 255f,
+            alpha = 1f
+        )
+    }
 
     // 新增：存放要繪製的參考點
     var overlayPoints: List<ReferencePoint> = emptyList()
 
+    // 新增當前位置屬性
+    var currentPosition: CurrentPosition? = null
+
+    // 修改：存放目前的圖片 ID 和正確的地圖圖片
+    var currentImageId: Int = R.drawable.floor_map
+    var currentMapImage: MapImage? = null
+    
+    // 修改繪製方法，加入當前位置的繪製
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         // 繪製最新的參考點
         drawReferencePointsOnCanvas(canvas, overlayPoints)
+        // 繪製當前位置
+        drawCurrentPosition(canvas)
+    }
+    
+    // 新增：繪製當前位置的方法
+    private fun drawCurrentPosition(canvas: Canvas) {
+        currentPosition?.let { pos ->
+            // 檢查當前位置是否應該在這張地圖上顯示
+            if (currentMapImage == null || currentMapImage?.id != currentImageId) {
+                return  // 如果地圖不匹配，不繪製位置
+            }
+            
+            if (drawable == null) return
+            
+            val bitmapWidth = drawable.intrinsicWidth.toFloat()
+            val bitmapHeight = drawable.intrinsicHeight.toFloat()
+            
+            // 計算當前位置在圖片上的絕對位置
+            val pointXOnBitmap = (pos.x / 100f * bitmapWidth)
+            val pointYOnBitmap = (pos.y / 100f * bitmapHeight)
+            
+            // 轉換為螢幕座標
+            val bitmapPoint = PointF(pointXOnBitmap.toFloat(), pointYOnBitmap.toFloat())
+            val mappedPoint = useTransformCoordBitmapToTouch(bitmapPoint.x, bitmapPoint.y)
+            
+            // 繪製當前位置 (大圓圈)
+            val positionPaint = Paint().apply {
+                isAntiAlias = true
+                style = Paint.Style.STROKE
+                strokeWidth = 6f
+                color = when {
+                    pos.accuracy > 0.8 -> Color.Green.toArgb()
+                    pos.accuracy > 0.5 -> Color.Yellow.toArgb()
+                    else -> Color.Red.toArgb()
+                }
+                alpha = 180
+            }
+            
+            // 繪製大圓圈表示當前位置
+            canvas.drawCircle(mappedPoint.x, mappedPoint.y, 50f, positionPaint)
+            
+            // 繪製中心點
+            val centerPaint = Paint().apply {
+                isAntiAlias = true
+                style = Paint.Style.FILL
+                color = when {
+                    pos.accuracy > 0.8 -> Color.Green.toArgb()
+                    pos.accuracy > 0.5 -> Color.Yellow.toArgb()
+                    else -> Color.Red.toArgb()
+                }
+            }
+            
+            canvas.drawCircle(mappedPoint.x, mappedPoint.y, 15f, centerPaint)
+        }
+    }
+}
+
+// 圖片選項卡組件
+@Composable
+fun MapImageTabItem(
+    mapImage: MapImage,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .height(36.dp)
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(18.dp),
+        color = if (isSelected)
+            MaterialTheme.colorScheme.primary
+        else
+            MaterialTheme.colorScheme.surface,
+        border = if (!isSelected)
+            androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+        else null
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Map,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = if (isSelected)
+                    MaterialTheme.colorScheme.onPrimary
+                else
+                    MaterialTheme.colorScheme.primary
+            )
+
+            Spacer(modifier = Modifier.width(4.dp))
+
+            Text(
+                text = mapImage.name,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (isSelected)
+                    MaterialTheme.colorScheme.onPrimary
+                else
+                    MaterialTheme.colorScheme.onSurface
+            )
+        }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapScreen() {
+fun MapScreen(
+    currentPosition: CurrentPosition? = null,
+    currentMapImage: MapImage? = null
+) {
     // 圖片尺寸狀態
     var imageSize by remember { mutableStateOf(IntSize.Zero) }
     
@@ -230,6 +335,11 @@ fun MapScreen() {
             Column {
                 TopAppBar(
                     title = { Text("地圖參考點標記") },
+                    colors = TopAppBarDefaults.topAppBarColors( // Explicitly set TopAppBar colors
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        titleContentColor = MaterialTheme.colorScheme.onPrimary,
+                        actionIconContentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
                     actions = {
                         // 添加模式切換開關
                         Row(
@@ -242,10 +352,10 @@ fun MapScreen() {
                                 color = if (isEditMode) 
                                     MaterialTheme.colorScheme.error 
                                 else 
-                                    MaterialTheme.colorScheme.onPrimary
+                                    LocalContentColor.current // Inherit from TopAppBar's actionIconContentColor
                             )
                             Spacer(modifier = Modifier.width(8.dp))
-                            androidx.compose.material3.Switch(
+                            Switch(
                                 checked = isEditMode,
                                 onCheckedChange = { isEditMode = it },
                                 thumbContent = {
@@ -255,12 +365,20 @@ fun MapScreen() {
                                         else
                                             Icons.Default.Visibility,
                                         contentDescription = null,
-                                        modifier = Modifier.size(16.dp)
+                                        modifier = Modifier.size(16.dp),
+                                        tint = if (isEditMode) { // Tint for Icon inside Switch thumb
+                                            MaterialTheme.colorScheme.onError // Contrasts with error thumb
+                                        } else {
+                                            // Icon color for unchecked state, contrasts with uncheckedThumbColor
+                                            MaterialTheme.colorScheme.primary 
+                                        }
                                     )
                                 },
                                 colors = SwitchDefaults.colors(
                                     checkedThumbColor = MaterialTheme.colorScheme.error,
-                                    checkedTrackColor = MaterialTheme.colorScheme.errorContainer
+                                    checkedTrackColor = MaterialTheme.colorScheme.errorContainer,
+                                    uncheckedThumbColor = MaterialTheme.colorScheme.outline, // Example color for unchecked thumb
+                                    uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant // Example color for unchecked track
                                 )
                             )
                         }
@@ -281,12 +399,12 @@ fun MapScreen() {
                     ) {
                         // 顯示所有可用地圖圖片供選擇
                         ReferencePointDatabase.availableMapImages.forEachIndexed { index, mapImage ->
-                            MapImageTab(
+                            MapImageTabItem( // Corrected typo from MapImageTabltem
                                 mapImage = mapImage,
                                 isSelected = currentImageId == mapImage.id,
                                 onClick = {
                                     currentImageId = mapImage.id
-                                    (customImageViewRef.value)?.setImageResource(mapImage.id)
+                                    customImageViewRef.value?.setImageResource(mapImage.id)
                                 }
                             )
                             
@@ -296,16 +414,8 @@ fun MapScreen() {
                             }
                         }
                     }
-                }
-                
                 HorizontalDivider()
-            }
-        },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = { showAddDialog = true }
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "新增參考點")
+                }
             }
         }
     ) { paddingValues ->
@@ -321,7 +431,7 @@ fun MapScreen() {
                     .fillMaxWidth()
                     .aspectRatio(1f)
                     .padding(16.dp)
-                    .background(Color.LightGray)
+                    .background(MaterialTheme.colorScheme.surfaceVariant) // Changed from Color.LightGray
             ) {
                 AndroidView(
                     factory = { ctx ->
@@ -473,6 +583,11 @@ fun MapScreen() {
                         // 傳入最新的參考點並重繪
                         (view as? MyCustomImageView)?.let { mv ->
                             mv.overlayPoints = filteredReferencePoints
+                            // 設置當前圖片 ID 和地圖資訊
+                            mv.currentImageId = currentImageId
+                            mv.currentMapImage = currentMapImage
+                            // 更新當前位置
+                            mv.currentPosition = currentPosition
                             mv.invalidate()
                         }
                     },
@@ -574,7 +689,7 @@ fun MapScreen() {
                                 Text(
                                     text = "尚無參考點，請點擊圖片或使用新增按鈕來添加",
                                     style = MaterialTheme.typography.bodyMedium,
-                                    color = Color.Gray,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant, // Changed from Color.Gray
                                     textAlign = TextAlign.Center
                                 )
                             }
@@ -602,11 +717,11 @@ fun MapScreen() {
                                                 modifier = Modifier
                                                     .size(24.dp)
                                                     .clip(CircleShape)
-                                                    .background(point.color),
+                                                    .background(getPointColor(point)),
                                                 contentAlignment = Alignment.Center
                                             ) {
                                                 Text(
-                                                    text = point.id.takeLast(1),
+                                                    text = if (point.id.isNotEmpty()) point.id.takeLast(1) else "?",
                                                     color = Color.White
                                                 )
                                             }
@@ -618,10 +733,18 @@ fun MapScreen() {
                                                     text = point.name,
                                                     style = MaterialTheme.typography.titleMedium
                                                 )
-                                                Text(
-                                                    text = "X: ${String.format(Locale.US, "%.2f", point.x)}%, Y: ${String.format(Locale.US, "%.2f", point.y)}%",
-                                                    style = MaterialTheme.typography.bodyMedium
-                                                )
+                                                Row {
+                                                    Text(
+                                                        text = "X: ${String.format(Locale.US, "%.2f", point.x)}%, Y: ${String.format(Locale.US, "%.2f", point.y)}%",
+                                                        style = MaterialTheme.typography.bodyMedium
+                                                    )
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text(
+                                                        text = "• ${point.scanCount} 次掃描",
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
                                             }
                                             
                                             Spacer(modifier = Modifier.weight(1f))
@@ -637,7 +760,7 @@ fun MapScreen() {
                                                 Icon(
                                                     painter = painterResource(android.R.drawable.ic_menu_delete),
                                                     contentDescription = "刪除",
-                                                    tint = Color.Red
+                                                    tint = MaterialTheme.colorScheme.error // Changed from Color.Red
                                                 )
                                             }
                                         }
@@ -723,10 +846,10 @@ fun MapScreen() {
                             onValueChange = { nameInput = it },
                             label = { Text("參考點名稱") },
                             keyboardOptions = KeyboardOptions(
-                                imeAction = ImeAction.Done
+                                imeAction = ImeAction.Next
                             ),
                             keyboardActions = KeyboardActions(
-                                onDone = {
+                                onNext = {
                                     keyboardController?.hide()
                                     focusManager.clearFocus()
                                 }
@@ -751,14 +874,18 @@ fun MapScreen() {
                                 
                             val name = nameInput.ifEmpty { "參考點 ${filteredReferencePoints.size + 1}" }
                             
+                            // 獲取掃描次數 - Use default value (e.g., 1 or a predefined constant)
+                            val scanCount = 0 // 修改為默認值 0，而非之前的 1
+                            
                             // 範圍檢查
                             if (x in 0.0..100.0 && y in 0.0..100.0) {
-                                // 創建新的參考點，包含當前圖片ID
+                                // 創建新的參考點，包含當前圖片ID和掃描次數
                                 val newPoint = ReferencePoint.createSimplePoint(
                                     name = name,
                                     x = x,
                                     y = y,
-                                    imageId = currentImageId // 使用當前選擇的圖片 ID
+                                    imageId = currentImageId,
+                                    scanCount = scanCount // 使用默認值 0
                                 )
                                 
                                 scope.launch {
@@ -816,67 +943,18 @@ fun MapScreen() {
     LaunchedEffect(currentImageId) {
         // 觸發重新渲染
         customImageViewRef.value?.invalidate()
-
     }
 }
 
-// 圖片選項卡組件
-@Composable
-fun MapImageTab(
-    mapImage: MapImage,
-    isSelected: Boolean,
-    onClick: () -> Unit
-) {
-    Surface(
-        modifier = Modifier
-            .height(36.dp)
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(18.dp),
-        color = if (isSelected) 
-            MaterialTheme.colorScheme.primary 
-        else 
-            MaterialTheme.colorScheme.surface,
-        border = if (!isSelected) 
-            androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
-        else null
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = Icons.Default.Map,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = if (isSelected) 
-                    MaterialTheme.colorScheme.onPrimary 
-                else 
-                    MaterialTheme.colorScheme.primary
-            )
-            
-            Spacer(modifier = Modifier.width(4.dp))
-            
-            Text(
-                text = mapImage.name,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (isSelected) 
-                    MaterialTheme.colorScheme.onPrimary 
-                else 
-                    MaterialTheme.colorScheme.onSurface
-            )
-        }
-    }
-}
 
-// 拓展 ReferencePoint 以支援顏色
-private val ReferencePoint.color: Color
-    get() {
-        // 使用 ID 的 hashCode 生成唯一但一致的顏色
-        val hash = id.hashCode()
-        return Color(
-            red = ((hash and 0xFF0000) shr 16) / 255f,
-            green = ((hash and 0x00FF00) shr 8) / 255f,
-            blue = (hash and 0x0000FF) / 255f,
-            alpha = 1f
-        )
-    }
+// 為參考點生成顏色的函數
+fun getPointColor(point: ReferencePoint): Color { // Removed @Composable annotation as per previous suggestion
+    // 使用 ID 的 hashCode 生成唯一但一致的顏色
+    val hash = point.id.hashCode()
+    return Color(
+        red = ((hash and 0xFF0000) shr 16) / 255f,
+        green = ((hash and 0x00FF00) shr 8) / 255f,
+        blue = (hash and 0x0000FF) / 255f,
+        alpha = 1f
+    )
+}

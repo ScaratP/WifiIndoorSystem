@@ -91,7 +91,7 @@ fun WifiScannerScreen() {
                 }
             }
             isScanning = false
-            delay(100) // 每0.1秒掃描一次
+            delay(2000) // 每2秒掃描一次 (從100ms改為2000ms)
         }
     }
 

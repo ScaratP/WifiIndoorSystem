@@ -24,6 +24,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -99,12 +100,26 @@ data class TabItem(
 
 @Composable
 fun WifiAppTabNavigation() {
+    // 添加共享的當前位置狀態
+    var sharedCurrentPosition by remember { mutableStateOf<CurrentPosition?>(null) }
+    var sharedCurrentMapImage by remember { mutableStateOf<MapImage?>(null) }
+    
     // 定義分頁選項
     val tabs = listOf(
         TabItem(
             title = "室內定位",
             icon = Icons.Default.LocationOn,
-            screen = { IndoorPositioningScreen() }
+            screen = { 
+                IndoorPositioningScreen(
+                    onPositionChange = { position, mapImage ->
+                        // 當位置更新時，更新共享狀態
+                        sharedCurrentPosition = position
+                        sharedCurrentMapImage = mapImage
+                    },
+                    currentPosition = sharedCurrentPosition,
+                    currentMapImage = sharedCurrentMapImage
+                ) 
+            }
         ),
         TabItem(
             title = "Wi-Fi 掃描",
@@ -114,7 +129,13 @@ fun WifiAppTabNavigation() {
         TabItem(
             title = "地圖測試",
             icon = Icons.Default.Map,
-            screen = { MapScreen() }
+            screen = { 
+                // 修改：同時傳遞當前位置和當前地圖資訊給 MapScreen
+                MapScreen(
+                    currentPosition = sharedCurrentPosition,
+                    currentMapImage = sharedCurrentMapImage
+                ) 
+            }
         )
     )
     
