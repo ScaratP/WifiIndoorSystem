@@ -86,6 +86,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -109,24 +110,32 @@ import java.util.UUID
 fun IndoorPositioningScreen(
     onPositionChange: (CurrentPosition?, MapImage?) -> Unit = { _, _ -> },
     currentPosition: CurrentPosition? = null,
-    currentMapImage: MapImage? = null
+    currentMapImage: MapImage? = null,
+    onNavigateToCurrentLocationTab: () -> Unit = {} // 新增回呼參數
 ) {
     val context = LocalContext.current
 
     // 建立權限請求器
     val requestLocationPermission = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
-        onResult = { /* 重繪後自動 re-check */ }
+        onResult = { isGranted -> 
+            if (isGranted) {
+                // 權限已授予，可以執行需要權限的操作
+            } else {
+                // 用戶拒絕了權限請求
+                Toast.makeText(context, "需要位置權限才能進行室內定位", Toast.LENGTH_LONG).show()
+            }
+        }
     )
 
-    // 檢查定位權限
+    // 檢查定位權限 - 刪除冗餘檢查
     val locationPermissionGranted = ContextCompat.checkSelfPermission(
         context, Manifest.permission.ACCESS_FINE_LOCATION
     ) == PackageManager.PERMISSION_GRANTED
 
+    // 權限不足時顯示請求畫面 - 增加額外檢查
     if (!locationPermissionGranted) {
         PermissionRequiredScreen(onRequestPermission = {
-            requestLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
             requestLocationPermission.launch(Manifest.permission.ACCESS_FINE_LOCATION)
         })
         return
@@ -164,6 +173,9 @@ fun IndoorPositioningScreen(
     // 匯出功能狀態
     var showExportDialog by remember { mutableStateOf(false) }
     var exportFileName by remember { mutableStateOf("wifi_reference_points") }
+    
+    // 匯入功能狀態
+    var showImportDialog by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
 
@@ -266,13 +278,15 @@ fun IndoorPositioningScreen(
                         }
                     }
                 } catch (se: SecurityException) {
-                    // 處理權限錯誤
+                    Toast.makeText(context, "需要位置權限才能進行掃描", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(context, "掃描出現錯誤: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
 
-            delay(500) // 減少短暫延遲以顯示掃描動畫 (從1000ms改為500ms)
+            delay(300)
             isScanning = false
-            delay(2000) // 每2秒掃描一次 (從5000ms改為2000ms)
+            delay(1000)
         }
     }
 
@@ -383,6 +397,31 @@ fun IndoorPositioningScreen(
         )
     }
 
+    // 匯入對話框
+    if (showImportDialog) {
+        ImportDataDialog(
+            onDismiss = { showImportDialog = false },
+            onImport = {
+                // 使用 Storage Access Framework 讓用戶選擇要匯入的 JSON 文件
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "application/json"
+                }
+                
+                try {
+                    val activity = context as? ComponentActivity
+                    activity?.startActivityForResult(intent, IMPORT_JSON_REQUEST_CODE)
+                } catch (e: Exception) {
+                    Toast.makeText(
+                        context,
+                        "無法開啟檔案選擇器: ${e.localizedMessage}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -399,6 +438,17 @@ fun IndoorPositioningScreen(
                     }
                 },
                 actions = {
+                    // 匯入按鈕
+                    IconButton(
+                        onClick = { showImportDialog = true }
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_file_download),
+                            contentDescription = "匯入資料",
+                            tint = MaterialTheme.colorScheme.onPrimary
+                        )
+                    }
+                    
                     // 匯出按鈕
                     IconButton(
                         onClick = {
@@ -558,7 +608,10 @@ fun IndoorPositioningScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onNavigateToCurrentLocationTab() } // 使其可點擊並呼叫回呼
+                            .padding(vertical = 4.dp) // 增加點擊區域
                     ) {
                         Icon(
                             imageVector = Icons.Default.MyLocation,
@@ -1689,5 +1742,92 @@ fun ExportDataDialog(
     }
 }
 
+// 匯入對話框
+@Composable
+fun ImportDataDialog(
+    onDismiss: () -> Unit,
+    onImport: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            shadowElevation = 8.dp
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(20.dp)
+                    .fillMaxWidth()
+            ) {
+                // 標題
+                Text(
+                    text = "匯入參考點資料",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 說明文字
+                Text(
+                    text = "選擇要匯入的 JSON 檔案，該檔案應包含從其他裝置匯出的參考點資料。\n\n匯入資料將與現有資料合併。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // 警告文字
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "確保匯入的參考點資料格式正確，否則可能導致匯入失敗。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // 按鈕列
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.padding(end = 8.dp)
+                    ) {
+                        Text("取消")
+                    }
+
+                    Button(
+                        onClick = {
+                            onImport()
+                            onDismiss()
+                        }
+                    ) {
+                        Text("選擇檔案")
+                    }
+                }
+            }
+        }
+    }
+}
 
 const val EXPORT_JSON_REQUEST_CODE = 1001
+const val IMPORT_JSON_REQUEST_CODE = 1002

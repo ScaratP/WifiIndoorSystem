@@ -16,9 +16,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SignalWifi0Bar
-//import androidx.compose.material.icons.filled.SignalWifi1Bar
-//import androidx.compose.material.icons.filled.SignalWifi2Bar
-//import androidx.compose.material.icons.filled.SignalWifi3Bar
 import androidx.compose.material.icons.filled.SignalWifi4Bar
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -33,6 +30,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import android.util.Log
+import android.widget.Toast
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.*
@@ -61,6 +60,7 @@ fun WifiScannerScreen() {
         return
     }
 
+    @Suppress("DEPRECATION")
     val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     var scanResults by remember { mutableStateOf<List<ScanResult>>(emptyList()) }
     var lastScanTime by remember { mutableStateOf("") }
@@ -74,20 +74,26 @@ fun WifiScannerScreen() {
                 context,
                 android.Manifest.permission.CHANGE_WIFI_STATE
             ) == PackageManager.PERMISSION_GRANTED
+            
+            val locationPermissionGranted = ContextCompat.checkSelfPermission(
+                context, 
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
 
-            if (changePermissionGranted) {
+            if (changePermissionGranted && locationPermissionGranted) {
                 try {
                     // 注意：startScan() 已被棄用，但我們仍暫時使用它
                     // 在生產環境中，應考慮使用 NetworkCallback 或 BroadcastReceiver 方法
-                    @Suppress("DEPRECATION")
                     wifiManager.startScan()
                     // 更新掃描結果
-                    @Suppress("DEPRECATION")
                     scanResults = wifiManager.scanResults
                     val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
                     lastScanTime = dateFormat.format(Date())
                 } catch (se: SecurityException) {
                     // 處理權限錯誤
+                    Log.e("WifiScanner", "權限錯誤：${se.message}")
+                } catch (e: Exception) {
+                    Log.e("WifiScanner", "掃描錯誤：${e.message}")
                 }
             }
             isScanning = false
@@ -103,14 +109,39 @@ fun WifiScannerScreen() {
                     IconButton(onClick = {
                         isScanning = true
                         try {
-                            @Suppress("DEPRECATION")
-                            wifiManager.startScan()
-                            @Suppress("DEPRECATION")
-                            scanResults = wifiManager.scanResults
-                            val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-                            lastScanTime = dateFormat.format(Date())
+                            val locationPermissionGranted = ContextCompat.checkSelfPermission(
+                                context, 
+                                Manifest.permission.ACCESS_FINE_LOCATION
+                            ) == PackageManager.PERMISSION_GRANTED
+                            
+                            if (locationPermissionGranted) {
+                                wifiManager.startScan()
+                                scanResults = wifiManager.scanResults
+                                val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                                lastScanTime = dateFormat.format(Date())
+                            } else {
+                                Toast.makeText(
+                                    context,
+                                    "需要位置權限才能掃描 Wi-Fi",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        } catch (se: SecurityException) {
+                            // 處理安全性異常
+                            Log.e("WifiScanner", "掃描時發生權限錯誤：${se.message}")
+                            Toast.makeText(
+                                context,
+                                "掃描時發生權限錯誤",
+                                Toast.LENGTH_SHORT
+                            ).show()
                         } catch (e: Exception) {
-                            // 處理錯誤
+                            // 處理其他錯誤
+                            Log.e("WifiScanner", "掃描時發生錯誤：${e.message}")
+                            Toast.makeText(
+                                context,
+                                "掃描時發生錯誤: ${e.message}",
+                                Toast.LENGTH_SHORT
+                            ).show()
                         } finally {
                             isScanning = false
                         }
@@ -307,9 +338,6 @@ fun WifiNetworkCard(result: ScanResult) {
 fun getSignalIconByLevel(level: Int): androidx.compose.ui.graphics.vector.ImageVector {
     return when {
         level >= -50 -> Icons.Filled.SignalWifi4Bar
-//        level >= -60 -> Icons.Filled.SignalWifi3Bar
-//        level >= -70 -> Icons.Filled.SignalWifi2Bar
-//        level >= -80 -> Icons.Filled.SignalWifi1Bar
         else -> Icons.Filled.SignalWifi0Bar
     }
 }

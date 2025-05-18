@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -33,8 +34,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import com.example.wifiindoorsystem.ui.theme.WifiIndoorSystemTheme
 
 // 使用 IndoorPositioningScreen.kt 中定義的常數
-// 導入 EXPORT_JSON_REQUEST_CODE 常數
+// 導入 EXPORT_JSON_REQUEST_CODE 和 IMPORT_JSON_REQUEST_CODE 常數
 import com.example.wifiindoorsystem.EXPORT_JSON_REQUEST_CODE
+import com.example.wifiindoorsystem.IMPORT_JSON_REQUEST_CODE
+// 匯入 CurrentLocationScreen
+import com.example.wifiindoorsystem.CurrentLocationScreen
 
 class MainActivity : ComponentActivity() {
     
@@ -89,6 +93,48 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        else if (requestCode == IMPORT_JSON_REQUEST_CODE && resultCode == Activity.RESULT_OK) {
+            data?.data?.let { uri ->
+                // 取得使用者選擇的檔案URI
+                try {
+                    // 讀取JSON檔案內容
+                    val jsonContent = contentResolver.openInputStream(uri)?.use { inputStream ->
+                        inputStream.bufferedReader().use { it.readText() }
+                    } ?: ""
+                    
+                    if (jsonContent.isNotEmpty()) {
+                        // 執行匯入邏輯
+                        val importedCount = currentDatabase?.importReferencePointsFromJson(jsonContent) ?: -1
+                        
+                        if (importedCount > 0) {
+                            Toast.makeText(
+                                this,
+                                "已成功匯入 $importedCount 個參考點",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } else {
+                            Toast.makeText(
+                                this,
+                                "匯入失敗，請確保檔案格式正確",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    } else {
+                        Toast.makeText(
+                            this,
+                            "檔案內容為空",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(
+                        this,
+                        "匯入失敗: ${e.localizedMessage}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
     }
 }
 
@@ -104,6 +150,9 @@ fun WifiAppTabNavigation() {
     var sharedCurrentPosition by remember { mutableStateOf<CurrentPosition?>(null) }
     var sharedCurrentMapImage by remember { mutableStateOf<MapImage?>(null) }
     
+    // 記住當前選中的分頁
+    var selectedTabIndex by remember { mutableIntStateOf(0) }
+
     // 定義分頁選項
     val tabs = listOf(
         TabItem(
@@ -111,14 +160,39 @@ fun WifiAppTabNavigation() {
             icon = Icons.Default.LocationOn,
             screen = { 
                 IndoorPositioningScreen(
-                    onPositionChange = { position, mapImage ->
+                    onPositionChange = { position, mapImage -> 
                         // 當位置更新時，更新共享狀態
                         sharedCurrentPosition = position
                         sharedCurrentMapImage = mapImage
+                        // 如果目前在即時位置分頁，也通知它更新
+                        if (selectedTabIndex == 1) {
+                            // 此處的 onPositionChange 是 CurrentLocationScreen 的
+                            // 我們需要一種方式觸發 CurrentLocationScreen 的刷新
+                            // MainActivity 直接控制 selectedTabIndex，所以可以這樣做
+                        }
                     },
                     currentPosition = sharedCurrentPosition,
-                    currentMapImage = sharedCurrentMapImage
+                    currentMapImage = sharedCurrentMapImage,
+                    onNavigateToCurrentLocationTab = {
+                        selectedTabIndex = 1 // "即時位置" 分頁的索引為 1
+                    }
                 ) 
+            }
+        ),
+        // 新增即時位置分頁
+        TabItem(
+            title = "即時位置",
+            icon = Icons.Default.MyLocation,
+            screen = {
+                CurrentLocationScreen(
+                    currentPosition = sharedCurrentPosition,
+                    currentMapImage = sharedCurrentMapImage,
+                    onPositionChange = { position, mapImage ->
+                        // 當 CurrentLocationScreen 刷新時，也更新共享狀態
+                        sharedCurrentPosition = position
+                        sharedCurrentMapImage = mapImage
+                    }
+                )
             }
         ),
         TabItem(
@@ -132,17 +206,14 @@ fun WifiAppTabNavigation() {
             screen = { 
                 // 修改：同時傳遞當前位置和當前地圖資訊給 MapScreen
                 MapScreen(
-                    currentPosition = sharedCurrentPosition,
-                    currentMapImage = sharedCurrentMapImage
+                    currentMapImage = sharedCurrentMapImage,
+                    currentPosition = sharedCurrentPosition // 添加當前位置參數
                 ) 
             }
         )
     )
     
-    // 記住當前選中的分頁
-    var selectedTabIndex by remember { mutableIntStateOf(0) }
-    
-    Scaffold { paddingValues ->
+    Scaffold { paddingValues -> 
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -150,7 +221,7 @@ fun WifiAppTabNavigation() {
         ) {
             // 分頁列
             TabRow(selectedTabIndex = selectedTabIndex) {
-                tabs.forEachIndexed { index, item ->
+                tabs.forEachIndexed { index, item -> 
                     Tab(
                         selected = selectedTabIndex == index,
                         onClick = { selectedTabIndex = index },

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -52,6 +53,14 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.unit.sp
+import coil.compose.rememberAsyncImagePainter
 import com.ortiz.touchview.OnTouchImageViewListener
 import com.ortiz.touchview.TouchImageView
 import kotlinx.coroutines.launch
@@ -159,72 +168,15 @@ class MyCustomImageView(context: Context, attrs: AttributeSet? = null) : TouchIm
     // 新增：存放要繪製的參考點
     var overlayPoints: List<ReferencePoint> = emptyList()
 
-    // 新增當前位置屬性
-    var currentPosition: CurrentPosition? = null
-
     // 修改：存放目前的圖片 ID 和正確的地圖圖片
     var currentImageId: Int = R.drawable.floor_map
     var currentMapImage: MapImage? = null
     
-    // 修改繪製方法，加入當前位置的繪製
+    // 修改繪製方法，刪除繪製當前位置的調用
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         // 繪製最新的參考點
         drawReferencePointsOnCanvas(canvas, overlayPoints)
-        // 繪製當前位置
-        drawCurrentPosition(canvas)
-    }
-    
-    // 新增：繪製當前位置的方法
-    private fun drawCurrentPosition(canvas: Canvas) {
-        currentPosition?.let { pos ->
-            // 檢查當前位置是否應該在這張地圖上顯示
-            if (currentMapImage == null || currentMapImage?.id != currentImageId) {
-                return  // 如果地圖不匹配，不繪製位置
-            }
-            
-            if (drawable == null) return
-            
-            val bitmapWidth = drawable.intrinsicWidth.toFloat()
-            val bitmapHeight = drawable.intrinsicHeight.toFloat()
-            
-            // 計算當前位置在圖片上的絕對位置
-            val pointXOnBitmap = (pos.x / 100f * bitmapWidth)
-            val pointYOnBitmap = (pos.y / 100f * bitmapHeight)
-            
-            // 轉換為螢幕座標
-            val bitmapPoint = PointF(pointXOnBitmap.toFloat(), pointYOnBitmap.toFloat())
-            val mappedPoint = useTransformCoordBitmapToTouch(bitmapPoint.x, bitmapPoint.y)
-            
-            // 繪製當前位置 (大圓圈)
-            val positionPaint = Paint().apply {
-                isAntiAlias = true
-                style = Paint.Style.STROKE
-                strokeWidth = 6f
-                color = when {
-                    pos.accuracy > 0.8 -> Color.Green.toArgb()
-                    pos.accuracy > 0.5 -> Color.Yellow.toArgb()
-                    else -> Color.Red.toArgb()
-                }
-                alpha = 180
-            }
-            
-            // 繪製大圓圈表示當前位置
-            canvas.drawCircle(mappedPoint.x, mappedPoint.y, 50f, positionPaint)
-            
-            // 繪製中心點
-            val centerPaint = Paint().apply {
-                isAntiAlias = true
-                style = Paint.Style.FILL
-                color = when {
-                    pos.accuracy > 0.8 -> Color.Green.toArgb()
-                    pos.accuracy > 0.5 -> Color.Yellow.toArgb()
-                    else -> Color.Red.toArgb()
-                }
-            }
-            
-            canvas.drawCircle(mappedPoint.x, mappedPoint.y, 15f, centerPaint)
-        }
     }
 }
 
@@ -279,8 +231,8 @@ fun MapImageTabItem(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MapScreen(
-    currentPosition: CurrentPosition? = null,
-    currentMapImage: MapImage? = null
+    currentMapImage: MapImage? = null,
+    currentPosition: CurrentPosition? = null // 添加參數
 ) {
     // 圖片尺寸狀態
     var imageSize by remember { mutableStateOf(IntSize.Zero) }
@@ -329,6 +281,9 @@ fun MapScreen(
     // 控制參考點列表的展開/收起狀態
     var isListExpanded by remember { mutableStateOf(true) }
 
+    // 添加刷新狀態
+    var isRefreshing by remember { mutableStateOf(false) }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
@@ -341,6 +296,51 @@ fun MapScreen(
                         actionIconContentColor = MaterialTheme.colorScheme.onPrimary
                     ),
                     actions = {
+                        // 添加刷新按鈕
+                        IconButton(
+                            onClick = {
+                                scope.launch {
+                                    isRefreshing = true
+                                    try {
+                                        // 重新載入參考點資料
+                                        allReferencePoints = database.referencePoints
+                                        snackbarHostState.showSnackbar("已重新載入參考點資料")
+                                    } catch (e: Exception) {
+                                        snackbarHostState.showSnackbar("載入失敗: ${e.localizedMessage}")
+                                    } finally {
+                                        isRefreshing = false
+                                    }
+                                }
+                            }
+                        ) {
+                            if (isRefreshing) {
+                                // 刷新動畫
+                                val infiniteTransition = rememberInfiniteTransition(label = "refreshAnimation")
+                                val rotation by infiniteTransition.animateFloat(
+                                    initialValue = 0f,
+                                    targetValue = 360f,
+                                    animationSpec = infiniteRepeatable(
+                                        animation = tween(1000),
+                                        repeatMode = RepeatMode.Restart
+                                    ),
+                                    label = "rotationAnimation"
+                                )
+                                
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "正在刷新",
+                                    modifier = Modifier.rotate(rotation),
+                                    tint = MaterialTheme.colorScheme.onPrimary
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "刷新參考點",
+                                    tint = MaterialTheme.colorScheme.onPrimary
+                                )
+                            }
+                        }
+                        
                         // 添加模式切換開關
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -443,6 +443,17 @@ fun MapScreen(
                             customImageViewRef.value = this
                             touchImageViewRef.value = this
                             setImageResource(currentImageId) // 使用當前選擇的圖片ID
+                            
+                            // 如果有目前位置，自動選擇匹配的地圖
+                            currentPosition?.let { pos ->
+                                // 尋找正確的地圖（如果有）
+                                currentMapImage?.let { mapImg ->
+                                    if (currentImageId != mapImg.id) {
+                                        currentImageId = mapImg.id
+                                        setImageResource(mapImg.id)
+                                    }
+                                }
+                            }
                             
                             // 設置最大/最小縮放級別
                             maxZoom = 4f
@@ -586,8 +597,6 @@ fun MapScreen(
                             // 設置當前圖片 ID 和地圖資訊
                             mv.currentImageId = currentImageId
                             mv.currentMapImage = currentMapImage
-                            // 更新當前位置
-                            mv.currentPosition = currentPosition
                             mv.invalidate()
                         }
                     },

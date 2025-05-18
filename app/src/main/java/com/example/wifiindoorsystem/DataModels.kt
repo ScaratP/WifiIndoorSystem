@@ -334,6 +334,85 @@ class ReferencePointDatabase private constructor(context: Context) {
         return arr.toString()
     }
 
+    // 新增: 從JSON字串匯入參考點資料
+    fun importReferencePointsFromJson(jsonString: String): Int = runBlocking {
+        try {
+            val jsonArray = JSONArray(jsonString)
+            var importedCount = 0
+            
+            // 先獲取現有參考點資料，用於後續合併
+            val existingPoints = referencePoints.associateBy { it.id }
+            
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
+                
+                // 解析基本資料
+                val id = obj.getString("id")
+                val name = obj.getString("name")
+                val x = obj.getDouble("x")
+                val y = obj.getDouble("y")
+                val timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+                val imageId = obj.optInt("imageId", R.drawable.floor_map)
+                val scanCount = obj.optInt("scanCount", 0)
+                
+                // 解析 WiFi 讀數
+                val readingsArray = obj.getJSONArray("wifiReadings")
+                val wifiReadings = mutableListOf<WifiReading>()
+                
+                for (j in 0 until readingsArray.length()) {
+                    val readingObj = readingsArray.getJSONObject(j)
+                    val reading = WifiReading(
+                        bssid = readingObj.getString("bssid"),
+                        ssid = readingObj.getString("ssid"),
+                        level = readingObj.getInt("level"),
+                        frequency = readingObj.getInt("frequency"),
+                        batchId = readingObj.optString("batchId", UUID.randomUUID().toString()),
+                        scanTime = readingObj.optLong("scanTime", System.currentTimeMillis())
+                    )
+                    wifiReadings.add(reading)
+                }
+                
+                // 檢查是否已存在相同ID的參考點
+                val existingPoint = existingPoints[id]
+                val combinedReadings = if (existingPoint != null) {
+                    // 合併現有讀數和新讀數
+                    existingPoint.wifiReadings + wifiReadings
+                } else {
+                    wifiReadings
+                }
+                
+                // 如果點已存在，使用現有掃描次數和新掃描次數的較大值
+                val finalScanCount = if (existingPoint != null) {
+                    maxOf(existingPoint.scanCount, scanCount)
+                } else {
+                    scanCount
+                }
+                
+                // 創建參考點物件並儲存，設置 appendReadings 為 true 以保留現有資料
+                val point = ReferencePoint(
+                    id = id,
+                    name = name,
+                    x = x,
+                    y = y,
+                    timestamp = timestamp,
+                    wifiReadings = combinedReadings,
+                    imageId = imageId,
+                    appendReadings = existingPoint != null, // 如果點已存在，設為追加模式
+                    scanCount = finalScanCount
+                )
+                
+                addReferencePoint(point)
+                importedCount++
+            }
+            
+            return@runBlocking importedCount
+            
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return@runBlocking -1
+        }
+    }
+
     // 計算當前位置，使用加權 k-NN 演算法
     fun calculateCurrentPosition(
         scanResults: List<android.net.wifi.ScanResult>,
